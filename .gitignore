@@ -1,0 +1,8 @@
+# Keep endpoint evidence out of source control.
+reports/
+Dot1x-Report-*/
+test-artifacts/
+tests/.scratch/
+*.evtx
+*.etl
+*.clixml
