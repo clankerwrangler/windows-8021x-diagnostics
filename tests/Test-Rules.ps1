@@ -48,13 +48,15 @@ function New-TestEvidence {
 }
 function Assert-HasFinding {
     param($Findings, [string]$Id)
-    Assert-True (@($Findings | Where-Object { $_.Id -eq $Id }).Count -gt 0) ('Expected finding ' + $Id + '.')
+    $rows = @(@($Findings) | Where-Object { $null -ne $_ -and $_.Id -eq $Id })
+    Assert-True ($rows.Count -gt 0) ('Expected finding ' + $Id + '.')
 }
 function Assert-NoFinding {
     param($Findings, [string]$Id)
-    Assert-Equal @($Findings | Where-Object { $_.Id -eq $Id }).Count 0 ('Unexpected finding ' + $Id + '.')
+    $rows = @(@($Findings) | Where-Object { $null -ne $_ -and $_.Id -eq $Id })
+    Assert-Equal $rows.Count 0 ('Unexpected finding ' + $Id + '.')
 }
-function Get-TestFindings { param($Evidence) @(Get-Dot1xDiagnosis -Evidence $Evidence) }
+function Get-TestFindings { param($Evidence) @(@(Get-Dot1xDiagnosis -Evidence $Evidence) | Where-Object { $null -ne $_ }) }
 
 Test-Case 'baseline does not invent service or address faults' {
     $f = Get-TestFindings (New-TestEvidence)

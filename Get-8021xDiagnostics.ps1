@@ -499,7 +499,7 @@ function Get-Dot1xDiagnosis {
                 @('This is configuration evidence, not a DNS resolution test. Cached names, alternate resolvers, and local-only designs are not assessed.') -AuthenticationContext $history
         }
     }
-    return $findings.ToArray()
+    return ,$findings.ToArray()
 }
 
 function ConvertFrom-Dot1xProfileXml {
