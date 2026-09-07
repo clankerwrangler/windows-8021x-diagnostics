@@ -30,9 +30,11 @@ Get-Help .\Get-8021xDiagnostics.ps1 -Full
 
 ## Reports
 
-- **`report.txt`**: findings, evidence, next checks, and collection status. Start here.
+- **`report.txt`**: relevant configuration, concise findings and next checks, grouped history, and missing evidence. Start here.
 - **`report.json`**: structured findings and collection status.
 - **`evidence.json`**: collected metadata used by the rules.
+
+Console output and `report.txt` are compact by default. Add `-Detailed` for all finding details and collector diagnostics. `report.json`, `evidence.json`, and `-PassThru` keep the complete structured data. See [report output](docs/report-output.md).
 
 Reports can contain profile and server names, certificate identifiers, addresses, event messages, and user-identifying paths. Review the whole bundle before sharing.
 

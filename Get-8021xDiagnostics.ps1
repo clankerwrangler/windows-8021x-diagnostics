@@ -24,6 +24,9 @@ certificate identifiers, addresses, and saved paths can still identify users or 
 Limit interface-related collection and findings to this exact adapter alias.
 .PARAMETER ProfileName
 Limit profile findings and profile collection to this exact profile name.
+.PARAMETER Detailed
+Include all finding details and collector diagnostics in console output and report.txt.
+The default is a compact report. JSON artifacts remain complete in either mode.
 #>
 [CmdletBinding()]
 param(
@@ -40,6 +43,7 @@ param(
     [switch]$IncludeEventMessages,
     [switch]$OmitEventMessages,
     [switch]$PassThru,
+    [switch]$Detailed,
     [Parameter(DontShow=$true)][string]$WorkerName,
     [Parameter(DontShow=$true)][string]$WorkerContext
 )
@@ -200,11 +204,11 @@ function Add-Dot1xFinding {
     param([System.Collections.Generic.List[object]]$List, [string]$Id,
           [string]$Severity, [string]$Confidence, [string]$Category,
           [string]$Summary, [string[]]$Evidence, [string[]]$Remediation,
-          [string[]]$Limitations, $AuthenticationContext = $null)
+          [string[]]$Limitations, $AuthenticationContext = $null, $ReportScope = $null)
     $List.Add([pscustomobject][ordered]@{
         Id=$Id; Severity=$Severity; Confidence=$Confidence; Category=$Category
         Summary=$Summary; Evidence=@($Evidence); Remediation=@($Remediation)
-        Limitations=@($Limitations); AuthenticationContext=$AuthenticationContext
+        Limitations=@($Limitations); AuthenticationContext=$AuthenticationContext; ReportScope=$ReportScope
     })
 }
 
@@ -246,7 +250,7 @@ function Get-Dot1xDiagnosis {
         if ($interfaces.Count -eq 0) {
             Add-Dot1xFinding $findings 'TARGET-NOT-FOUND' 'Information' 'High' 'Scope' `
                 'The requested interface alias is not present in the collected interface evidence.' @('No interface-specific failure was inferred.') `
-                @('Check the exact interface alias and probe coverage in the affected endpoint context.') @('Missing interface data is not proof that the adapter is absent.')
+                @('Check the exact interface alias and probe coverage in the affected endpoint context.') @('Missing interface data is not proof that the adapter is absent.') -ReportScope ([pscustomobject]@{ InterfaceAlias=$targetAlias })
         }
     }
     if ($targetProfile) {
@@ -273,7 +277,7 @@ function Get-Dot1xDiagnosis {
                 Add-Dot1xFinding $findings 'TARGET-INTERFACE-NOT-UP' $severity 'High' 'Link state' `
                     "The targeted interface reports local state $link." @("Interface=$targetAlias; status=$link") `
                     @('Review the intended adapter, cable, dock, radio, and AP/link availability with the endpoint owner before an approved change.') `
-                    @('This is a local link fact, not a RADIUS, certificate, or password diagnosis. A disconnected or intentionally disabled interface can be expected.')
+                    @('This is a local link fact, not a RADIUS, certificate, or password diagnosis. A disconnected or intentionally disabled interface can be expected.') -ReportScope ([pscustomobject]@{ InterfaceAlias=$targetAlias; Status=$link })
             }
         }
     }
@@ -292,7 +296,7 @@ function Get-Dot1xDiagnosis {
         Add-Dot1xFinding $findings 'PROFILE-NOT-OBSERVED' 'Information' $confidence 'Profile' `
             $summary @("Requested profile=$targetProfile; required probes=$($requiredProfileProbes -join ', '); complete=$profileCoverageComplete") `
             @('Check the exact profile/interface name, affected user context, and profile assignment with the GPO/MDM or local profile owner.') `
-            @('A failed, skipped, or truncated query does not prove absence. Profiles belonging to other users or unapplied management assignments are not established by this snapshot.')
+            @('A failed, skipped, or truncated query does not prove absence. Profiles belonging to other users or unapplied management assignments are not established by this snapshot.') -ReportScope ([pscustomobject]@{ ProfileName=$targetProfile; Complete=$profileCoverageComplete })
     }
     $enterpriseProfiles = @($profiles | Where-Object { (Get-Dot1xValue $_ 'OneXEnabled') -eq $true })
     $wiredRequired = @($enterpriseProfiles | Where-Object { (Get-Dot1xValue $_ 'Kind') -eq 'Wired' }).Count -gt 0
@@ -314,7 +318,7 @@ function Get-Dot1xDiagnosis {
                 Add-Dot1xFinding $findings $id $serviceSeverity $serviceConfidence 'Services' `
                     $serviceSummary @("Status=$status; start mode=$start; targeted interface=$targetAlias") `
                     @('Confirm that the target connection requires AutoConfig, then check the service start mode, dependencies, and service events.') `
-                    @('Stopped AutoConfig can itself prevent profile enumeration. Nonenterprise wired operation might not need dot3svc. A stored profile might not be the attempted connection. This does not identify a RADIUS cause.')
+                    @('Stopped AutoConfig can itself prevent profile enumeration. Nonenterprise wired operation might not need dot3svc. A stored profile might not be the attempted connection. This does not identify a RADIUS cause.') -ReportScope ([pscustomobject]@{ Service=$name; Status=$status; StartMode=$start; InterfaceAlias=$targetAlias; ProfileRequired=(($name -eq 'dot3svc' -and $wiredRequired) -or ($name -eq 'WlanSvc' -and $wirelessRequired)) })
             }
         }
         if ($name -eq 'EapHost' -and $start -eq 'Disabled' -and $enterpriseProfiles.Count -gt 0) {
@@ -331,7 +335,7 @@ function Get-Dot1xDiagnosis {
             Add-Dot1xFinding $findings 'PROFILE-SERVER-VALIDATION-DISABLED' 'Warning' 'High' 'Profile' `
                 "$label explicitly disables server certificate validation." @('The profile contains an explicit disabled validation setting.') `
                 @('Configure the intended server names and trust anchors in the deployed profile, with server validation enabled.') `
-                @('This is a security configuration concern, not proof of the observed connection failure.')
+                @('This is a security configuration concern, not proof of the observed connection failure.') -ReportScope ([pscustomobject]@{ ProfileName=(Get-Dot1xValue $p 'Name'); Kind=(Get-Dot1xValue $p 'Kind'); InterfaceGuid=(Get-Dot1xValue $p 'InterfaceGuid') })
         }
         $eapTypes = @(Get-Dot1xValue $p 'EapTypes' @())
         if ($eapTypes -contains 13) {
@@ -379,7 +383,7 @@ function Get-Dot1xDiagnosis {
                     "$label contains EAP-TLS, but no structurally eligible, time-valid client certificate was found in the inspected stores." `
                     @("AuthMode=$authMode; stores=$($neededStores -join ', '); private-key/EKU candidates=$($eligible.Count)", "Scoped inventory counts: expired structural candidates=$expired; future-dated structural candidates=$future; missing associated keys=$missingKeys; explicit EKUs excluding client authentication=$wrongEku") `
                     @('Review enrollment, renewal, certificate selection filters, and the intended user or machine authentication context with the certificate administrator.', 'For the intended network certificate only: renew if expired; check the clock and issuance dates if future-dated; review approved enrollment/key association if the key is missing; review the template if its EKU excludes client authentication.') `
-                    @('Unrelated certificates in a personal store are not defects. These counts describe inspected inventory, not the certificate selected by the supplicant.', 'CurrentUser belongs to the collector identity, not necessarily the affected user. TEAP/PEAP inner-method alternatives and server policy can change certificate requirements. No key access, server mapping, or authentication was tested.')
+                    @('Unrelated certificates in a personal store are not defects. These counts describe inspected inventory, not the certificate selected by the supplicant.', 'CurrentUser belongs to the collector identity, not necessarily the affected user. TEAP/PEAP inner-method alternatives and server policy can change certificate requirements. No key access, server mapping, or authentication was tested.') -ReportScope ([pscustomobject]@{ ProfileName=(Get-Dot1xValue $p 'Name'); Kind=(Get-Dot1xValue $p 'Kind'); InterfaceGuid=(Get-Dot1xValue $p 'InterfaceGuid'); Stores=@($neededStores) })
             } elseif ($valid.Count -gt 0) {
                 Add-Dot1xFinding $findings 'CERT-CANDIDATES-PRESENT' 'Information' 'Medium' 'Certificate' `
                     "$label has structurally eligible client certificate candidates." `
@@ -388,13 +392,23 @@ function Get-Dot1xDiagnosis {
                         '{0}:{1}; cached chain={2}; errors={3}; status={4}' -f (Get-Dot1xValue $_ 'Store'),(Get-Dot1xValue $_ 'Thumbprint'),(Get-Dot1xValue $chain 'Assessment' 'Unknown'),(Get-Dot1xValue $chain 'TrustErrorMask' 'Unknown'),(@(Get-Dot1xValue $chain 'Status' @()) -join ', ')
                     }) `
                     @('Match candidates to profile filters, issuer requirements, server account mapping, and the actual authentication context.', 'If a scoped candidate has cached chain errors, ask the PKI owner which chain element failed. Unknown/offline revocation is not proof of revocation; partial chain can mean missing cached issuers, and a chain time error can concern an issuer.') `
-                    @('No EKU means unrestricted EKU; any-purpose also permits client authentication structurally. HasPrivateKey proves presence only. Offline chain results and candidates do not prove server acceptance or key usability.')
+                    @('No EKU means unrestricted EKU; any-purpose also permits client authentication structurally. HasPrivateKey proves presence only. Offline chain results and candidates do not prove server acceptance or key usability.') `
+                    -ReportScope ([pscustomobject]@{
+                        ProfileName=(Get-Dot1xValue $p 'Name'); Kind=(Get-Dot1xValue $p 'Kind'); InterfaceGuid=(Get-Dot1xValue $p 'InterfaceGuid'); CandidateCount=$valid.Count;
+                        StoreSummary=(@($neededStores | ForEach-Object {
+                            $storeName = $_
+                            $storeCount = @($valid | Where-Object { (Get-Dot1xValue $_ 'Store') -eq $storeName }).Count
+                            '{0}={1}' -f $storeName,$storeCount
+                        }) -join ', ');
+                        ChainErrors=@($valid | Where-Object { (Get-Dot1xValue (Get-Dot1xValue $_ 'Chain') 'Assessment') -eq 'CachedChainErrors' }).Count;
+                        UnknownChains=@($valid | Where-Object { (Get-Dot1xValue (Get-Dot1xValue $_ 'Chain') 'Assessment') -notin @('CachedChainErrors','NoErrorsInCachedAssessment') }).Count
+                    })
                 $nearExpiry = @($valid | Where-Object { ([datetime](Get-Dot1xValue $_ 'NotAfterUtc')).ToUniversalTime() -le $now.AddDays(30) })
                 if ($nearExpiry.Count -eq $valid.Count) {
                     Add-Dot1xFinding $findings 'CERT-CANDIDATES-EXPIRING' 'Warning' 'Medium' 'Certificate' `
                         "All inspected time-valid candidates for $label expire within 30 days." `
                         @($nearExpiry | ForEach-Object { '{0}: {1}' -f (Get-Dot1xValue $_ 'Thumbprint'), (Get-Dot1xValue $_ 'NotAfterUtc') }) `
-                        @('Arrange renewal through the certificate policy owner before expiration.') @('The actual selected certificate is not established.')
+                        @('Arrange renewal through the certificate policy owner before expiration.') @('The actual selected certificate is not established.') -ReportScope ([pscustomobject]@{ ProfileName=(Get-Dot1xValue $p 'Name'); Kind=(Get-Dot1xValue $p 'Kind'); InterfaceGuid=(Get-Dot1xValue $p 'InterfaceGuid') })
                 }
             }
         }
@@ -451,7 +465,7 @@ function Get-Dot1xDiagnosis {
             Add-Dot1xFinding $findings 'WLAN-CURRENT-STATE-UNAVAILABLE' 'Information' 'High' 'Wireless state' `
                 'The native WLAN current-connection query was unavailable.' @("Native result code=$code") `
                 @('Review access and the current connection from the affected user context. Windows 11 location permission can restrict this API; ask the affected user or policy owner to review it if appropriate.') `
-                @('No permission was changed. An unavailable query does not prove disconnection or authentication failure.')
+                @('No permission was changed. An unavailable query does not prove disconnection or authentication failure.') -ReportScope ([pscustomobject]@{ Code=$code; InterfaceGuid=(Get-Dot1xValue $wireless 'InterfaceGuid') })
         }
     }
     $ipConfigurations = @(Get-Dot1xValue $Evidence 'IpConfiguration' @())
@@ -491,12 +505,12 @@ function Get-Dot1xDiagnosis {
                 "$alias is up, but its collected addresses contain no usable non-link-local IPv4 or IPv6 address." `
                 @("InterfaceIndex=$index", $authContext) `
                 @('Review DHCP, static addressing, intended VLAN, and any IPv6-only design. If authentication succeeded for this attempt, investigate post-authentication addressing separately.') `
-                @('Link-local-only operation can be intentional. No addressing or connectivity test was performed.') -AuthenticationContext $history
+                @('Link-local-only operation can be intentional. No addressing or connectivity test was performed.') -AuthenticationContext $history -ReportScope ([pscustomobject]@{ InterfaceAlias=$alias })
         } elseif (@(Get-Dot1xValue $ip 'DnsServers' @()).Count -eq 0) {
             Add-Dot1xFinding $findings 'DNS-NO-SERVERS' 'Warning' 'High' 'DNS configuration' `
                 "$alias has a usable address but no collected DNS server configuration." @("InterfaceIndex=$index", $authContext) `
                 @('Review the intended DNS configuration and DHCP options after confirming the authentication stage.') `
-                @('This is configuration evidence, not a DNS resolution test. Cached names, alternate resolvers, and local-only designs are not assessed.') -AuthenticationContext $history
+                @('This is configuration evidence, not a DNS resolution test. Cached names, alternate resolvers, and local-only designs are not assessed.') -AuthenticationContext $history -ReportScope ([pscustomobject]@{ InterfaceAlias=$alias })
         }
     }
     return $findings.ToArray()
@@ -1431,36 +1445,534 @@ function Get-Dot1xEvidence {
     return [pscustomobject]$evidence
 }
 
+# Presentation only. Diagnosis rules and raw evidence remain unchanged.
+function ConvertTo-Dot1xReportText {
+    param($Value)
+    # Keep data on its own line; raw values remain in the JSON artifacts.
+    return ([regex]::Replace([string]$Value, '[\p{Cc}\p{Cf}]', ' ')).Trim()
+}
+
+function ConvertTo-Dot1xReportTime {
+    param($Value)
+    $time = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AllowWhiteSpaces, [ref]$time)) {
+        return $time.ToUniversalTime()
+    }
+    return $null
+}
+
+function Get-Dot1xReportScope {
+    param($Evidence)
+    $collection = Get-Dot1xValue $Evidence 'Collection'
+    $alias = [string](Get-Dot1xValue $collection 'InterfaceAlias')
+    $profileName = [string](Get-Dot1xValue $collection 'ProfileName')
+    $interfaces = @(Get-Dot1xValue $Evidence 'Interfaces' @() | Where-Object { $null -ne $_ })
+    $profiles = @(Get-Dot1xValue $Evidence 'Profiles' @() | Where-Object { $null -ne $_ })
+    if ($alias) { $interfaces = @($interfaces | Where-Object { (Get-Dot1xValue $_ 'Alias') -eq $alias }) }
+    if ($profileName) { $profiles = @($profiles | Where-Object { (Get-Dot1xValue $_ 'Name') -eq $profileName }) }
+    $guids = @($interfaces | ForEach-Object { ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid') } | Where-Object { $_ })
+    if ($alias) { $profiles = @($profiles | Where-Object { $guids -contains (ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid')) }) }
+    if (-not $alias) {
+        $profileGuids = @($profiles | Where-Object { $profileName -or (Get-Dot1xValue $_ 'OneXEnabled') -eq $true } |
+            ForEach-Object { ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid') } | Where-Object { $_ })
+        $interfaces = @($interfaces | Where-Object {
+            $guid = ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid')
+            $isPhysical = (Get-Dot1xValue $_ 'HardwareInterface') -eq $true -or
+                [string](Get-Dot1xValue $_ 'PhysicalMediaType') -match '802\.3|802\.11|Wireless|^(9|14)$' -or
+                (Get-Dot1xValue $_ 'MediaType') -eq '802.3'
+            $hasProfile = $guid -and $profileGuids -contains $guid
+            ($hasProfile -and $profileName) -or ($isPhysical -and (Get-Dot1xValue $_ 'Virtual') -ne $true -and
+                (Get-Dot1xValue $_ 'Status') -eq 'Up' -and -not $profileName)
+        })
+        $guids = @($interfaces | ForEach-Object { ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid') } | Where-Object { $_ })
+        $profiles = @($profiles | Where-Object {
+            $guid = ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid')
+            -not $guid -or $guids -contains $guid
+        })
+    }
+    if (-not $profileName) {
+        $profiles = @($profiles | Where-Object {
+            $profile = $_
+            $guid = ConvertTo-Dot1xGuid (Get-Dot1xValue $profile 'InterfaceGuid')
+            $current = @(Get-Dot1xValue $Evidence 'Wireless' @() | Where-Object {
+                (ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid')) -eq $guid -and
+                -not [string]::IsNullOrWhiteSpace([string](Get-Dot1xValue $_ 'CurrentProfileName'))
+            })
+            $current.Count -ne 1 -or (Get-Dot1xValue $profile 'Name') -ceq (Get-Dot1xValue $current[0] 'CurrentProfileName')
+        })
+    }
+    $media = @($profiles | ForEach-Object { Get-Dot1xValue $_ 'Kind' } | Where-Object { $_ -in @('Wired','Wireless') })
+    foreach ($adapter in $interfaces) {
+        $physical = [string](Get-Dot1xValue $adapter 'PhysicalMediaType')
+        if ($physical -match '802\.11|Wireless|^9$') { $media += 'Wireless' }
+        elseif ($physical -in @('802.3','14') -or (Get-Dot1xValue $adapter 'MediaType') -eq '802.3') { $media += 'Wired' }
+    }
+    [pscustomobject]@{ Alias=$alias; ProfileName=$profileName; Interfaces=$interfaces; Profiles=$profiles; Guids=$guids; Media=@($media | Select-Object -Unique) }
+}
+
+function Test-Dot1xReportProbeRelevant {
+    param([string]$Name, $Scope)
+    if ($Scope.Media.Count -eq 1) {
+        if ($Scope.Media[0] -eq 'Wired' -and ($Name -eq 'Wireless' -or $Name -like 'Events:Microsoft-Windows-WLAN-AutoConfig/*')) { return $false }
+        if ($Scope.Media[0] -eq 'Wireless' -and ($Name -eq 'Wired' -or $Name -like 'Events:Microsoft-Windows-Wired-AutoConfig/*')) { return $false }
+    }
+    if ($Name -like 'Certificates*' -and $Scope.Profiles.Count -gt 0) {
+        $modes = @($Scope.Profiles | ForEach-Object { [string](Get-Dot1xValue $_ 'AuthMode') } | Select-Object -Unique)
+        if ($modes.Count -eq 1 -and $modes[0] -eq 'machine' -and $Name -eq 'CertificatesCurrentUser') { return $false }
+        if ($modes.Count -eq 1 -and $modes[0] -eq 'user' -and $Name -eq 'CertificatesLocalMachine') { return $false }
+    }
+    return $true
+}
+
+function Get-Dot1xHistoryNextCheck {
+    param([string]$Labels)
+    switch -Regex ($Labels) {
+        'CERT_E_UNTRUSTEDROOT|SEC_E_UNTRUSTED_ROOT|CERT_E_CHAINING' { return 'Check the presented chain, intermediate certificates, and trust store for this attempt.' }
+        'CERT_E_EXPIRED|SEC_E_CERT_EXPIRED' { return 'Check certificate validity dates and endpoint time.' }
+        'CERT_E_CN_NO_MATCH' { return 'Compare the configured server names with the certificate presented in this attempt.' }
+        'CERT_E_INVALID_NAME' { return 'Check name constraints in the certificate chain.' }
+        'CERT_E_REVOKED' { return 'Confirm which certificate was reported revoked and review its replacement.' }
+        'REVOCATION|NO_REVOCATION_CHECK' { return 'Check chain-event details and the relevant CRL/OCSP availability.' }
+        'USER_CERT_NOT_FOUND|NTE_BAD_KEYSET' { return 'Check certificate enrollment and key availability in the authentication identity context.' }
+        'NO_CREDENTIALS|UNABLE_TO_IDENTIFY_USER|UNKNOWN_CREDENTIALS' { return 'Check the user/machine identity and configured credential source.' }
+        'ONEX_UI_' { return 'Check whether the configured method requires a prompt in this sign-in context.' }
+        'ALGORITHM_MISMATCH|ILLEGAL_MESSAGE' { return 'Compare client and RADIUS TLS settings and the matching server log.' }
+        default { return 'Match this time and interface with the RADIUS/NPS log to identify the next check.' }
+    }
+}
+
+function Get-Dot1xReportHistory {
+    param($Evidence, $Scope)
+    $captured = ConvertTo-Dot1xReportTime (Get-Dot1xValue $Evidence 'CapturedAtUtc')
+    $lookback = 0
+    [void][int]::TryParse([string](Get-Dot1xValue (Get-Dot1xValue $Evidence 'Collection') 'LookbackHours'), [ref]$lookback)
+    $records = New-Object 'System.Collections.Generic.List[object]'
+    $ordinal = 0
+    foreach ($event in @(Get-Dot1xValue $Evidence 'Events' @())) {
+        $ordinal++
+        $provider = [string](Get-Dot1xValue $event 'ProviderName')
+        $id = Get-Dot1xValue $event 'Id'
+        $outcome = ''
+        if ($provider -eq 'Microsoft-Windows-WLAN-AutoConfig') {
+            if ($id -eq 12012) { $outcome='Success' }; if ($id -eq 12013) { $outcome='Failure' }
+        } elseif ($provider -eq 'Microsoft-Windows-Wired-AutoConfig') {
+            if ($id -eq 15505) { $outcome='Success' }; if ($id -eq 15514) { $outcome='Failure' }
+        }
+        if (-not $outcome) { continue }
+        $time = ConvertTo-Dot1xReportTime (Get-Dot1xValue $event 'TimeCreatedUtc')
+        if ($null -ne $time -and $null -ne $captured -and ($time -gt $captured -or ($lookback -gt 0 -and $time -lt $captured.AddHours(-$lookback)))) { continue }
+        $guid = ConvertTo-Dot1xGuid (Get-Dot1xValue $event 'InterfaceGuid')
+        $fields = Get-Dot1xValue $event 'Fields'
+        $profile = [string](Get-Dot1xValue $fields 'ProfileName')
+        if ($Scope.Alias -and $Scope.Guids -notcontains $guid) { continue }
+        if ($Scope.ProfileName -and $profile -ne $Scope.ProfileName) { continue }
+        # Without an explicit target, retain unassigned history, but never merge
+        # records lacking a stable interface/profile into another connection.
+        $mode = [string](Get-Dot1xValue $fields 'AuthMode')
+        $connection = [string](Get-Dot1xValue $fields 'ConnectionId')
+        $unassigned = ''
+        if (-not $guid -or -not $profile -or $null -eq $time) { $unassigned = [string]$ordinal }
+        $context = ConvertTo-Json -InputObject @($provider,$guid,$profile,$mode,$connection,
+            (Get-Dot1xValue $fields 'EapType'),(Get-Dot1xValue $fields 'InnerEapType'),
+            (Get-Dot1xValue $fields 'AuthenticationType'),$unassigned) -Compress
+        $details = @(Get-Dot1xEventCodeDetails $event)
+        $codes = @($details | ForEach-Object {
+            $value = $_.HexValue
+            if (-not $value) { $value = ConvertTo-Dot1xReportText $_.RawValue }
+            '{0}={1}' -f $_.Field,$value
+        } | Sort-Object)
+        $labels = @($details | Where-Object { $_.CandidateLabel } | ForEach-Object { $_.CandidateLabel } | Select-Object -Unique)
+        $key = ConvertTo-Json -InputObject @($context,$outcome,(Get-Dot1xValue $event 'Version'),$codes) -Depth 5 -Compress
+        $target = $guid
+        $adapter = @($Scope.Interfaces | Where-Object { (ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid')) -eq $guid })
+        if ($adapter.Count -eq 1) { $target = [string](Get-Dot1xValue $adapter[0] 'Alias') }
+        if (-not $target) { $target = 'Unassigned interface' }
+        if ($profile) { $target += ' | ' + $profile } else { $target += ' | profile unknown' }
+        if ($mode) { $target += ' | ' + $mode }
+        if ($connection) { $target += ' | connection ' + $connection }
+        $records.Add([pscustomobject]@{ Key=$key; Context=$context; Outcome=$outcome; Time=$time;
+            Target=$target; Codes=$codes; Labels=$labels; Guid=$guid;
+            CanCompare=([bool]($null -ne $time -and $guid -and $profile -and ($mode -or $connection))) })
+    }
+    foreach ($group in @($records | Group-Object -Property Key -CaseSensitive)) {
+        $ordered = @($group.Group | Sort-Object -Property Time)
+        $first = $ordered[0]; $last = $ordered[$ordered.Count - 1]
+        $later = @()
+        if ($last.Outcome -eq 'Failure' -and $last.CanCompare) {
+            $later = @($records | Where-Object {
+                $_.Outcome -eq 'Success' -and $_.Context -ceq $last.Context -and $_.Time -gt $last.Time
+            } | Sort-Object -Property Time)
+        }
+        $laterTime = $null
+        if ($later.Count -gt 0) { $laterTime = $later[$later.Count - 1].Time.ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) }
+        $firstText = 'time not recorded'; $lastText = 'time not recorded'
+        if ($null -ne $first.Time) { $firstText = $first.Time.ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) }
+        if ($null -ne $last.Time) { $lastText = $last.Time.ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) }
+        [pscustomobject]@{
+            Target=$last.Target; ContextKey=$last.Context; Outcome=$last.Outcome; Count=$ordered.Count
+            FirstUtc=$firstText; LastUtc=$lastText
+            LaterSuccessUtc=$laterTime; ContextKnown=$last.CanCompare
+            Codes=@($last.Codes); PossibleMeanings=@($last.Labels)
+            NextCheck=$(if ($null -eq $last.Time) { 'Locate this event in the source log and confirm its timestamp.' } else { Get-Dot1xHistoryNextCheck ($last.Labels -join ' ') })
+        }
+    }
+}
+
+function Get-Dot1xReportProfileLabel {
+    param($Profile, [object[]]$Interfaces = @(), [string]$NameField = 'ProfileName')
+    $name = [string](Get-Dot1xValue $Profile $NameField)
+    $guid = ConvertTo-Dot1xGuid (Get-Dot1xValue $Profile 'InterfaceGuid')
+    if ($guid) {
+        $adapters = @($Interfaces | Where-Object { (ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid')) -eq $guid })
+        $label = $guid
+        if ($adapters.Count -eq 1) { $label = [string](Get-Dot1xValue $adapters[0] 'Alias') }
+        $name += ' | ' + $label
+    }
+    return $name
+}
+
+function Get-Dot1xCompactIssue {
+    param($Finding, [object[]]$Interfaces = @())
+    $id = [string](Get-Dot1xValue $Finding 'Id')
+    $scope = Get-Dot1xValue $Finding 'ReportScope'
+    $title = [string](Get-Dot1xValue $Finding 'Summary')
+    $meaning = ''; $next = ''
+    $profile = Get-Dot1xReportProfileLabel -Profile $scope -Interfaces $Interfaces
+    $alias = [string](Get-Dot1xValue $scope 'InterfaceAlias')
+    switch ($id) {
+        'TARGET-NOT-FOUND' {
+            $title = 'Target interface not observed: ' + $alias
+            $meaning = 'The requested alias is missing from the collected interface data.'
+            $next = 'Check the alias and interface collection status.'
+        }
+        'TARGET-INTERFACE-NOT-UP' {
+            $title = '{0}: {1}' -f $alias,(Get-Dot1xValue $scope 'Status')
+            $meaning = 'The selected link is not up; an intentionally disconnected adapter may be expected.'
+            $next = 'Check the intended link, cable/dock or radio before investigating EAP.'
+        }
+        'PROFILE-NOT-OBSERVED' {
+            $title = 'Requested profile not observed: ' + $profile
+            $meaning = 'No matching profile was found in the inspected scope.'
+            if ((Get-Dot1xValue $scope 'Complete') -ne $true) { $meaning = 'Profile collection was incomplete; profile absence is not established.' }
+            $next = 'Check the profile name, affected user, and deployed assignment.'
+        }
+        { $_ -in @('SERVICE-WLAN-NOT-RUNNING','SERVICE-WIRED-NOT-RUNNING') } {
+            $title = '{0}: {1} (start mode: {2})' -f (Get-Dot1xValue $scope 'Service'),(Get-Dot1xValue $scope 'Status'),(Get-Dot1xValue $scope 'StartMode')
+            $meaning = 'An inspected 802.1X profile requires this service.'
+            if ((Get-Dot1xValue $scope 'ProfileRequired') -ne $true) { $meaning = 'This service handles 802.1X on the selected medium; profile requirements are unknown.' }
+            $next = 'Check the service start mode, dependencies, and recent service errors.'
+        }
+        'EAPHOST-DISABLED' {
+            $title = 'EapHost is disabled'
+            $meaning = 'An 802.1X profile is present, but EapHost cannot start.'
+            $next = 'Check the effective EapHost service start configuration.'
+        }
+        'PROFILE-SERVER-VALIDATION-DISABLED' {
+            $title = 'Server certificate validation disabled: ' + $profile
+            $meaning = 'At least one configured method disables validation. This is a security issue, not an identified connection-failure cause.'
+            $next = 'Enable validation with the intended server names and trust anchors in the deployed profile.'
+        }
+        'CERT-NO-SUITABLE-CANDIDATE' {
+            $title = 'No client certificate candidate: ' + $profile
+            $stores = @(Get-Dot1xValue $scope 'Stores' @()) -join ', '
+            $meaning = "$stores`: none passed the date, client-auth usage, and key-presence checks. This may prevent the configured EAP-TLS method from authenticating."
+            if ($stores -match 'CurrentUser') { $meaning += ' CurrentUser is the collector account.' }
+            $next = 'Check certificate enrollment and renewal in the configured user/machine context.'
+        }
+        'CERT-CANDIDATES-EXPIRING' {
+            $title = 'All observed certificate candidates expire within 30 days: ' + $profile
+            $meaning = 'Renewal may be needed; the certificate actually selected by Windows is unknown.'
+            $next = 'Check and renew the certificate used for this connection.'
+        }
+        'IP-NO-USABLE-ADDRESS' {
+            $title = 'No non-link-local address: ' + $alias
+            $meaning = 'The link is up, but addressing may be incomplete. Link-local-only operation can also be intentional.'
+            $next = 'Check the intended VLAN and DHCP/static addressing; compare the authentication history.'
+        }
+        'DNS-NO-SERVERS' {
+            $title = 'No configured DNS servers: ' + $alias
+            $meaning = 'Name lookup may be affected; no DNS query was run.'
+            $next = 'Check the intended DNS configuration and DHCP options.'
+        }
+        'EVIDENCE-EMPTY' {
+            $title = 'Not enough evidence to assess the connection'
+            $meaning = 'No interface or profile evidence was collected.'
+            $next = 'Collect on the affected endpoint and review any missing evidence below.'
+        }
+        default {
+            # Unknown future rules stay visible, including their limitations.
+            $meaning = @(Get-Dot1xValue $Finding 'Limitations' @()) -join ' '
+            $next = @(Get-Dot1xValue $Finding 'Remediation' @()) -join ' '
+        }
+    }
+    # Legacy report objects have no structured scope: retain their observation
+    # rather than display an empty or guessed interface/profile name.
+    if ($null -eq $scope -and $id -notin @('EAPHOST-DISABLED','EVIDENCE-EMPTY')) {
+        $title = [string](Get-Dot1xValue $Finding 'Summary')
+        $meaning = @(Get-Dot1xValue $Finding 'Limitations' @()) -join ' '
+        $next = @(Get-Dot1xValue $Finding 'Remediation' @()) -join ' '
+    }
+    [pscustomobject]@{ Id=$id; Title=$title; Meaning=$meaning; NextCheck=$next }
+}
+
+function New-Dot1xReportView {
+    param([Parameter(Mandatory=$true)]$Report, $Evidence = $null)
+    $scope = Get-Dot1xReportScope $Evidence
+    $configuration = New-Object 'System.Collections.Generic.List[string]'
+    $issues = New-Object 'System.Collections.Generic.List[object]'
+    $gaps = New-Object 'System.Collections.Generic.List[string]'
+    $findings = @(Get-Dot1xValue $Report 'Findings' @())
+    $eapNames = @{ 13='EAP-TLS'; 21='EAP-TTLS'; 25='PEAP'; 26='EAP-MSCHAPv2'; 55='TEAP' }
+    foreach ($adapter in $scope.Interfaces) {
+        $alias = [string](Get-Dot1xValue $adapter 'Alias')
+        $guid = ConvertTo-Dot1xGuid (Get-Dot1xValue $adapter 'InterfaceGuid')
+        $configuration.Add(('{0}: {1}' -f $alias,(Get-Dot1xValue $adapter 'Status' 'unknown')))
+        foreach ($ip in @(Get-Dot1xValue $Evidence 'IpConfiguration' @() | Where-Object {
+            (Get-Dot1xValue $_ 'InterfaceIndex') -eq (Get-Dot1xValue $adapter 'InterfaceIndex')
+        })) {
+            $addresses = @((Get-Dot1xValue $ip 'IPv4Addresses' @())) + @((Get-Dot1xValue $ip 'IPv6Addresses' @()))
+            $addressText = @($addresses | ForEach-Object {
+                if ($_ -is [string]) { $_ } else { Get-Dot1xValue $_ 'IPAddress' }
+            } | Where-Object { $_ }) -join ', '
+            if ($addressText) { $configuration.Add(('  Addresses: ' + $addressText)) }
+            $dns = @(Get-Dot1xValue $ip 'DnsServers' @()) -join ', '
+            if ($dns) { $configuration.Add(('  DNS: ' + $dns)) }
+        }
+    }
+    foreach ($profile in $scope.Profiles) {
+        if ((Get-Dot1xValue $profile 'OneXEnabled') -ne $true) {
+            $state = '802.1X setting unknown'
+            if ((Get-Dot1xValue $profile 'OneXEnabled') -eq $false) { $state = '802.1X disabled' }
+            $configuration.Add(('Profile {0}: {1}' -f (Get-Dot1xReportProfileLabel -Profile $profile -Interfaces $scope.Interfaces -NameField 'Name'),$state))
+            continue
+        }
+        $methods = @()
+        foreach ($type in @(Get-Dot1xValue $profile 'EapTypes' @())) {
+            $number = 0
+            if ([int]::TryParse([string]$type,[ref]$number) -and $eapNames.ContainsKey($number)) { $methods += $eapNames[$number] }
+            else { $methods += ('EAP type ' + [string]$type) }
+        }
+        if ($methods.Count -eq 0) { $methods = @('method not read') }
+        $mode = [string](Get-Dot1xValue $profile 'AuthMode' 'not specified')
+        if (-not $mode) { $mode = 'not specified' }
+        $configuration.Add(('Profile {0} ({1}): {2}; auth mode: {3}' -f
+            (Get-Dot1xReportProfileLabel -Profile $profile -Interfaces $scope.Interfaces -NameField 'Name'),(Get-Dot1xValue $profile 'Kind'),($methods -join ', '),$mode))
+    }
+    $relevantServices = @('EapHost')
+    if (@($scope.Profiles | Where-Object { (Get-Dot1xValue $_ 'Kind') -eq 'Wired' }).Count -gt 0) { $relevantServices += 'dot3svc' }
+    if (@($scope.Profiles | Where-Object { (Get-Dot1xValue $_ 'Kind') -eq 'Wireless' }).Count -gt 0) { $relevantServices += 'WlanSvc' }
+    if ($scope.Profiles.Count -gt 0) {
+        $serviceText = @(Get-Dot1xValue $Evidence 'Services' @() | Where-Object {
+            $name = [string](Get-Dot1xValue $_ 'Name')
+            $normalDemandStart = $name -eq 'EapHost' -and (Get-Dot1xValue $_ 'Status') -eq 'Stopped' -and (Get-Dot1xValue $_ 'StartMode') -eq 'Manual'
+            $relevantServices -contains $name -and -not $normalDemandStart
+        } | ForEach-Object { '{0}={1}' -f (Get-Dot1xValue $_ 'Name'),(Get-Dot1xValue $_ 'Status') }) -join '; '
+        if ($serviceText) { $configuration.Add('Services: ' + $serviceText) }
+    }
+    foreach ($finding in $findings) {
+        $id = [string](Get-Dot1xValue $finding 'Id')
+        $findingScope = Get-Dot1xValue $finding 'ReportScope'
+        if ($null -ne $findingScope -and $null -ne $Evidence -and
+            $id -in @('CERT-CANDIDATES-PRESENT','CERT-CANDIDATES-EXPIRING','CERT-NO-SUITABLE-CANDIDATE','PROFILE-SERVER-VALIDATION-DISABLED')) {
+            $findingGuid = ConvertTo-Dot1xGuid (Get-Dot1xValue $findingScope 'InterfaceGuid')
+            if ($findingGuid -and @($scope.Profiles | Where-Object {
+                (ConvertTo-Dot1xGuid (Get-Dot1xValue $_ 'InterfaceGuid')) -eq $findingGuid -and
+                (Get-Dot1xValue $_ 'Name') -ceq (Get-Dot1xValue $findingScope 'ProfileName')
+            }).Count -eq 0) { continue }
+        }
+        if ($id -eq 'SERVICE-WLAN-NOT-RUNNING' -and -not (Test-Dot1xReportProbeRelevant -Name 'Wireless' -Scope $scope)) { continue }
+        if ($id -eq 'SERVICE-WIRED-NOT-RUNNING' -and -not (Test-Dot1xReportProbeRelevant -Name 'Wired' -Scope $scope)) { continue }
+        if ($id -eq 'CERT-CANDIDATES-PRESENT' -and $null -ne $findingScope) {
+            $configuration.Add(('Certificate candidates for {0}: {1}; {2}' -f
+                (Get-Dot1xReportProfileLabel -Profile $findingScope -Interfaces $scope.Interfaces),(Get-Dot1xValue $findingScope 'CandidateCount'),
+                (Get-Dot1xValue $findingScope 'StoreSummary')))
+            $chainErrors = [int](Get-Dot1xValue $findingScope 'ChainErrors' 0)
+            $unknownChains = [int](Get-Dot1xValue $findingScope 'UnknownChains' 0)
+            if ($chainErrors -gt 0 -or $unknownChains -gt 0) {
+                $configuration.Add(('  Cached chains: {0} with errors, {1} unknown/offline; selected certificate unknown.' -f $chainErrors,$unknownChains))
+            }
+            continue
+        }
+        if ($id -eq 'WLAN-CURRENT-STATE-UNAVAILABLE') {
+            if (-not (Test-Dot1xReportProbeRelevant -Name 'Wireless' -Scope $scope)) { continue }
+            $gaps.Add(('Current WLAN state unavailable (code {0}); disconnection is not established.' -f (Get-Dot1xValue $findingScope 'Code' 'unknown')))
+            continue
+        }
+        if ($id -eq 'COLLECTION-INCOMPLETE') {
+            if (@(Get-Dot1xValue $Report 'Probes' @()).Count -eq 0) { $gaps.Add('Collection is incomplete; probe details were not recorded.') }
+            continue
+        }
+        if ($id -in @('AUTH-HISTORICAL-FAILURE','TLS-EAP-SUPPORTING-HISTORY','NTLM-CREDENTIAL-GUARD-CONTEXT') -and $null -ne $Evidence) { continue }
+        # Only suppress unrelated per-interface address notices when we can
+        # establish their scope. Unknown future findings are never filtered out.
+        if ($id -in @('IP-NO-USABLE-ADDRESS','DNS-NO-SERVERS') -and $null -ne $findingScope -and $null -ne $Evidence) {
+            $aliases = @($scope.Interfaces | ForEach-Object { Get-Dot1xValue $_ 'Alias' })
+            if ($aliases -notcontains (Get-Dot1xValue $findingScope 'InterfaceAlias')) { continue }
+        }
+        $issues.Add((Get-Dot1xCompactIssue -Finding $finding -Interfaces $scope.Interfaces))
+    }
+    foreach ($probe in @(Get-Dot1xValue $Report 'Probes' @())) {
+        $name = [string](Get-Dot1xValue $probe 'Name')
+        $status = [string](Get-Dot1xValue $probe 'Status')
+        $limits = @(Get-Dot1xValue $probe 'Limitations' @())
+        # Never hide failed cleanup, including a successful worker whose
+        # temporary XML could not be removed. Keep any supplied path intact.
+        $cleanup = @($limits | Where-Object { $_ -match '(?i)cleanup|remaining files|sensitive.*retained' })
+        if ((Get-Dot1xValue $probe 'CleanupConfirmed') -eq $false -or $cleanup.Count -gt 0) {
+            $detail = $cleanup -join ' '
+            if (-not $detail) { $detail = 'An owned diagnostic process may still be running.' }
+            $gaps.Add(('Cleanup needs attention: ' + $detail))
+        }
+        if (-not (Test-Dot1xReportProbeRelevant -Name $name -Scope $scope)) { continue }
+        if ($status -eq 'Succeeded' -and $limits.Count -eq 0) { continue }
+        $logRows = @(Get-Dot1xValue $Evidence 'EventLogs' @() | Where-Object {
+            ('Events:' + [string](Get-Dot1xValue $_ 'LogName') + ':' + [string](Get-Dot1xValue $_ 'ProviderFilter')) -eq $name
+        })
+        $detail = ''
+        if ($logRows.Count -eq 1) {
+            $log = $logRows[0]
+            if ((Get-Dot1xValue $log 'Enabled') -eq $false) { $detail = 'Logging is disabled; retained history may be incomplete.' }
+            elseif ((Get-Dot1xValue $log 'QueryStatus') -eq 'UnsupportedProviderChannel') { $detail = 'This provider does not publish to this channel.' }
+            elseif ((Get-Dot1xValue $log 'Truncated') -eq $true) { $detail = 'Event limit reached; older matching events may be missing.' }
+        }
+        if (-not $detail -and $status -ne 'Succeeded') {
+            switch ($name) {
+                'Interfaces' { $detail = 'Interface/IP data incomplete; link and addressing findings may be missing.' }
+                'Services' { $detail = 'Service states could not all be read.' }
+                'Wired' { $detail = 'Wired profiles were not fully read; profile assignment is unknown.' }
+                'Wireless' { $detail = 'Wireless profile/connection data was not fully read.' }
+                'CertificatesCurrentUser' { $detail = 'User certificates were not fully read; candidate absence is unknown.' }
+                'CertificatesLocalMachine' { $detail = 'Machine certificates were not fully read; candidate absence is unknown.' }
+            }
+            if ($status -eq 'Skipped') { $detail = 'Not collected; collection ended before this probe ran.' }
+        }
+        if (-not $detail) {
+            $ordinary = @($limits | Where-Object { $cleanup -notcontains $_ } | Select-Object -Unique)
+            if ($ordinary.Count -gt 0) { $detail = $ordinary -join ' ' }
+            elseif ($status -ne 'Succeeded') { $detail = $status + '; this evidence was not fully collected.' }
+        }
+        if ($detail) {
+            $source = $name -replace '^Events:', '' -replace 'Microsoft-Windows-', ''
+            $source = $source.TrimEnd(':') -replace ':', ' / '
+            $gaps.Add(('{0}: {1}' -f $source,$detail))
+        }
+    }
+    if ($null -eq $Evidence) { $gaps.Add('Detailed evidence was not supplied; configuration and grouped history cannot be reconstructed.') }
+    elseif ($null -eq (ConvertTo-Dot1xReportTime (Get-Dot1xValue $Evidence 'CapturedAtUtc'))) { $gaps.Add('Capture time unavailable; the event lookback could not be applied.') }
+    $hasContext = $scope.Interfaces.Count -gt 0 -or $scope.Profiles.Count -gt 0
+    $history = @(Get-Dot1xReportHistory -Evidence $Evidence -Scope $scope | Sort-Object -Property LastUtc -Descending)
+    $linkedSuccesses = @($history | Where-Object { $_.LaterSuccessUtc })
+    $history = @($history | Where-Object {
+        $item = $_
+        $item.Outcome -ne 'Success' -or $item.Count -gt 1 -or @($linkedSuccesses | Where-Object {
+            $_.ContextKey -ceq $item.ContextKey -and $_.LaterSuccessUtc -eq $item.LastUtc
+        }).Count -eq 0
+    })
+    $support = @($findings | Where-Object { (Get-Dot1xValue $_ 'Id') -in @('TLS-EAP-SUPPORTING-HISTORY','NTLM-CREDENTIAL-GUARD-CONTEXT') })
+    [pscustomobject]@{
+        Configuration=$configuration.ToArray(); Issues=$issues.ToArray(); History=$history
+        Gaps=@($gaps | Select-Object -Unique); HasContext=$hasContext
+        HasSupportingHistory=($support.Count -gt 0)
+    }
+}
+
+function Add-Dot1xReportLine {
+    param([System.Collections.Generic.List[string]]$Lines, [string]$Text, [string]$Prefix = '')
+    $textLine = ConvertTo-Dot1xReportText $Text
+    $width = [Math]::Max(40,100 - $Prefix.Length)
+    while ($textLine.Length -gt $width) {
+        $cut = $textLine.LastIndexOf(' ', $width)
+        if ($cut -lt 1) { break }
+        $Lines.Add($Prefix + $textLine.Substring(0,$cut))
+        $textLine = $textLine.Substring($cut + 1).TrimStart()
+    }
+    $Lines.Add($Prefix + $textLine)
+}
+
 function Format-Dot1xReport {
-    param([Parameter(Mandatory=$true)]$Report)
+    param([Parameter(Mandatory=$true)]$Report, $Evidence = $null, [switch]$Detailed)
     $lines = New-Object 'System.Collections.Generic.List[string]'
-    $lines.Add('Windows wired and wireless 802.1X endpoint diagnostics')
-    $lines.Add('Sensitive report: review before sharing. Collection is minimized, not universally redacted.')
-    $lines.Add('Captured UTC: ' + [string](Get-Dot1xValue $Report 'CapturedAtUtc'))
+    $lines.Add('Windows 802.1X diagnostics')
+    Add-Dot1xReportLine $lines ('Captured UTC: ' + [string](Get-Dot1xValue $Report 'CapturedAtUtc'))
     $savedDirectory = [string](Get-Dot1xValue $Report 'OutputDirectory')
-    if ($savedDirectory) { $lines.Add('Saved reports: ' + $savedDirectory) }
-    $lines.Add('No remediation, network probes, or authentication attempts were performed.')
-    $lines.Add('This snapshot does not test current authentication or establish RADIUS/NPS decisions.')
+    if ($savedDirectory) { $lines.Add('Saved reports: ' + (ConvertTo-Dot1xReportText $savedDirectory)) }
     $lines.Add('')
-    foreach ($finding in @(Get-Dot1xValue $Report 'Findings' @())) {
-        $lines.Add(('[{0}; confidence={1}] {2}: {3}' -f $finding.Severity,$finding.Confidence,$finding.Id,$finding.Summary))
-        foreach ($item in @($finding.Evidence)) { $lines.Add('  Evidence: ' + $item) }
-        foreach ($item in @($finding.Remediation)) { $lines.Add('  Next step (not executed): ' + $item) }
-        foreach ($item in @($finding.Limitations)) { $lines.Add('  Limitation: ' + $item) }
+    $view = New-Dot1xReportView -Report $Report -Evidence $Evidence
+    if ($view.Configuration.Count -gt 0) {
+        $lines.Add('Configuration')
+        foreach ($line in $view.Configuration) { Add-Dot1xReportLine $lines $line '  ' }
         $lines.Add('')
     }
-    $lines.Add('Collection limitations:')
-    foreach ($item in @(Get-Dot1xValue (Get-Dot1xValue $Report 'Collection') 'Limitations' @())) { $lines.Add('  ' + $item) }
-    foreach ($probe in @(Get-Dot1xValue $Report 'Probes' @())) {
-        $lines.Add(('  Probe {0}: {1}, {2} ms' -f $probe.Name,$probe.Status,$probe.DurationMs))
-        foreach ($item in @($probe.Limitations)) { $lines.Add('    ' + $item) }
+    if ($view.Issues.Count -gt 0) {
+        foreach ($issue in $view.Issues) {
+            Add-Dot1xReportLine $lines $issue.Title
+            if ($issue.Meaning) { Add-Dot1xReportLine $lines $issue.Meaning '  ' }
+            if ($issue.NextCheck) { Add-Dot1xReportLine $lines ('Next: ' + $issue.NextCheck) '  ' }
+            $lines.Add('')
+        }
+    } elseif (-not $view.HasContext) {
+        $lines.Add('Not enough interface/profile evidence to assess the connection.')
+        $lines.Add('')
+    } elseif ($view.Gaps.Count -gt 0) {
+        $lines.Add('No actionable configuration findings; see missing evidence below.')
+        $lines.Add('')
+    } else {
+        $lines.Add('No issues identified in the collected configuration.')
+        $lines.Add('')
+    }
+    $lines.Add('Authentication history (UTC)')
+    if ($view.History.Count -eq 0) { $lines.Add('  No matching authentication outcomes in the collected history.') }
+    $historyLimit = 10
+    if ($Detailed) { $historyLimit = [int]::MaxValue }
+    foreach ($group in @($view.History | Select-Object -First $historyLimit)) {
+        Add-Dot1xReportLine $lines $group.Target '  '
+        $range = $group.LastUtc
+        if ($group.FirstUtc -ne $group.LastUtc) { $range = $group.FirstUtc + ' to ' + $group.LastUtc }
+        Add-Dot1xReportLine $lines ('{0} {1} event(s): {2}' -f $group.Count,$group.Outcome.ToLowerInvariant(),$range) '    '
+        if ($group.Outcome -eq 'Failure') {
+            if ($group.Codes.Count -gt 0) { Add-Dot1xReportLine $lines ($group.Codes -join '; ') '    ' }
+            else { $lines.Add('    No structured error code recorded.') }
+            if ($group.PossibleMeanings.Count -gt 0) { Add-Dot1xReportLine $lines ('Possible meaning (numeric match): ' + ($group.PossibleMeanings -join '; ')) '    ' }
+            if ($group.LaterSuccessUtc) {
+                Add-Dot1xReportLine $lines ('Later same-context success recorded: ' + $group.LaterSuccessUtc + '.') '    '
+            } else {
+                if ($group.ContextKnown) { $lines.Add('    No later same-context success in the collected history.') }
+                else { $lines.Add('    Attempt context incomplete; recovery not assessed.') }
+                Add-Dot1xReportLine $lines ('Next: ' + $group.NextCheck) '    '
+            }
+        }
+    }
+    if ($view.History.Count -gt $historyLimit) {
+        $lines.Add(('  {0} older group(s) not shown; use -Detailed or evidence.json.' -f ($view.History.Count - $historyLimit)))
+    }
+    if ($view.HasSupportingHistory) { $lines.Add('  Uncorrelated EAP/TLS or NTLM events are also available in evidence.json.') }
+    if ($view.Gaps.Count -gt 0) {
+        $lines.Add(''); $lines.Add('Missing evidence / collection issues')
+        foreach ($gap in $view.Gaps) { Add-Dot1xReportLine $lines $gap '  ' }
+    }
+    if ($savedDirectory) { $lines.Add(''); $lines.Add('Full findings: report.json | Full evidence: evidence.json') }
+    if ($Detailed) {
+        $lines.Add(''); $lines.Add('Detailed findings and collection diagnostics')
+        foreach ($finding in @(Get-Dot1xValue $Report 'Findings' @())) {
+            Add-Dot1xReportLine $lines ('[{0}; confidence={1}] {2}: {3}' -f $finding.Severity,$finding.Confidence,$finding.Id,$finding.Summary)
+            foreach ($item in @($finding.Evidence)) { Add-Dot1xReportLine $lines ('Evidence: ' + $item) '  ' }
+            foreach ($item in @($finding.Remediation)) { Add-Dot1xReportLine $lines ('Next step: ' + $item) '  ' }
+            foreach ($item in @($finding.Limitations)) { Add-Dot1xReportLine $lines ('Limitation: ' + $item) '  ' }
+            $lines.Add('')
+        }
+        foreach ($item in @(Get-Dot1xValue (Get-Dot1xValue $Report 'Collection') 'Limitations' @())) { Add-Dot1xReportLine $lines $item '  ' }
+        foreach ($probe in @(Get-Dot1xValue $Report 'Probes' @())) {
+            Add-Dot1xReportLine $lines ('Probe {0}: {1}, {2} ms' -f $probe.Name,$probe.Status,$probe.DurationMs) '  '
+            foreach ($item in @($probe.Limitations)) { Add-Dot1xReportLine $lines $item '    ' }
+        }
     }
     return ($lines -join [Environment]::NewLine)
 }
 
 function Write-Dot1xReport {
     param([Parameter(Mandatory=$true)]$Report, [Parameter(Mandatory=$true)]$Evidence,
-          [Parameter(Mandatory=$true)][string]$OutputDirectory)
+          [Parameter(Mandatory=$true)][string]$OutputDirectory, [switch]$Detailed)
     $runName = 'Dot1x-Report-' + [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss.fffZ',[Globalization.CultureInfo]::InvariantCulture) + '-' + [guid]::NewGuid().ToString('N')
     $runPath = Join-Path -Path $OutputDirectory -ChildPath $runName -ErrorAction Stop
     $lease = New-Dot1xPrivateDirectory -Path $runPath -CreateParents
@@ -1469,7 +1981,7 @@ function Write-Dot1xReport {
         $outputs = [ordered]@{
             'evidence.json'=($Evidence | ConvertTo-Json -Depth 20)
             'report.json'=($Report | ConvertTo-Json -Depth 20)
-            'report.txt'=(Format-Dot1xReport -Report $Report)
+            'report.txt'=(Format-Dot1xReport -Report $Report -Evidence $Evidence -Detailed:$Detailed)
         }
         foreach ($item in $outputs.GetEnumerator()) { if ($item.Value.Length -gt 16777216) { throw 'A report exceeds the 16 MiB character bound.' } }
         $encoding = New-Object Text.UTF8Encoding($false)
@@ -1517,8 +2029,8 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Collection=(Get-Dot1xValue $evidence 'Collection'); Probes=@(Get-Dot1xValue $evidence 'Probes' @())
                 Findings=@(Get-Dot1xDiagnosis -Evidence $evidence)
             }
-            if ($OutputDirectory) { $null = Write-Dot1xReport -Report $report -Evidence $evidence -OutputDirectory $OutputDirectory }
-            if ($PassThru) { $report } else { Format-Dot1xReport -Report $report }
+            if ($OutputDirectory) { $null = Write-Dot1xReport -Report $report -Evidence $evidence -OutputDirectory $OutputDirectory -Detailed:$Detailed }
+            if ($PassThru) { $report } else { Format-Dot1xReport -Report $report -Evidence $evidence -Detailed:$Detailed }
         } catch { Write-Error -Message ('Diagnostics failed: ' + $_.Exception.Message) -ErrorAction Continue; exit 1 }
     }
 }

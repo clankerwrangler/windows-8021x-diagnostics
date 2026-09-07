@@ -1,0 +1,27 @@
+Illustrative layout using synthetic values; not a captured endpoint report.
+
+Windows 802.1X diagnostics
+Captured UTC: 2026-09-07T19:00:00Z
+
+Configuration
+  Ethernet: Up
+  Addresses: 192.0.2.10
+  DNS: 192.0.2.53
+  Profile Corp | Ethernet (Wired): EAP-TLS; auth mode: machine
+  Services: dot3svc=Running
+
+No client certificate candidate: Corp | Ethernet
+  LocalMachine: none passed the date, client-auth usage, and key-presence checks.
+  This may prevent the configured EAP-TLS method from authenticating.
+  Next: Check certificate enrollment and renewal in the configured user/machine context.
+
+Authentication history (UTC)
+  Ethernet | Corp | machine | connection session-1
+    3 failure event(s): 2026-09-07 18:00:00 to 2026-09-07 18:02:00
+    ErrorCode=0x800B0109
+    Possible meaning (numeric match): CERT_E_UNTRUSTEDROOT: the chain ended in an untrusted root
+    No later same-context success in the collected history.
+    Next: Check the presented chain, intermediate certificates, and trust store for this attempt.
+
+Missing evidence / collection issues
+  CAPI2/Operational: Logging is disabled; retained history may be incomplete.

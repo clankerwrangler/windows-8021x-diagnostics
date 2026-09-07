@@ -83,11 +83,35 @@ try {
         $before = @(Get-ChildItem -LiteralPath $caseRoot -Force).Count
         $r = Invoke-TestCli
         Assert-Equal $r.ExitCode 0 'Completed offline diagnosis did not exit zero.'
-        Assert-True ($r.Stdout -match 'COLLECTION-INCOMPLETE') 'Offline output lacks incomplete-collection findings.'
-        Assert-True ($r.Stdout -match 'COLLECTION-INCOMPLETE') 'Partial input lost its incomplete collection finding.'
+        Assert-True ($r.Stdout -match 'Missing evidence / collection issues') 'Compact output lacks the collection-gap section.'
+        Assert-True ($r.Stdout -match 'Synthetic denied collection') 'Compact output lost the specific collection gap.'
         Assert-True ($r.Stdout -notmatch 'Saved reports:') 'Pipeline-only text claims to have saved a report.'
         Assert-Equal @(Get-ChildItem -LiteralPath $caseRoot -Force).Count $before 'Pipeline-only output wrote files.'
     }
+    Test-Case 'Detailed restores internal finding detail without changing pipeline-only behavior' {
+        $before = @(Get-ChildItem -LiteralPath $caseRoot -Force).Count
+        $r = Invoke-TestCli '-Detailed'
+        Assert-Equal $r.ExitCode 0 'Detailed offline CLI failed.'
+        Assert-True ($r.Stdout -match 'COLLECTION-INCOMPLETE') 'Detailed output lost the original finding ID.'
+        Assert-True ($r.Stdout -match 'Detailed findings and collection diagnostics') 'Detailed mode did not reach the console.'
+        Assert-Equal @(Get-ChildItem -LiteralPath $caseRoot -Force).Count $before 'Detailed pipeline output wrote files.'
+    }
+    Test-Case 'compact and Detailed selection reaches saved text and leaves JSON complete' {
+        $styleDestination = Join-Path $caseRoot 'report-style-check'
+        foreach ($extra in @('', '-Detailed')) {
+            $r = Invoke-TestCli ('-OutputDirectory ' + (ConvertTo-TestLiteral $styleDestination) + ' ' + $extra)
+            Assert-Equal $r.ExitCode 0 'Report-style CLI failed.'
+            $runs = @(Get-TestRunDirectories $styleDestination)
+            $saved = @($runs | Where-Object { $r.Stdout.Contains('Saved reports: ' + $_.FullName) })
+            Assert-Equal $saved.Count 1 'CLI did not identify exactly one saved run.'
+            $text = [IO.File]::ReadAllText((Join-Path $saved[0].FullName 'report.txt'))
+            Assert-Equal $text.TrimEnd() $r.Stdout.TrimEnd() 'Console and saved text used different report styles.'
+            Assert-Equal ($text -match 'Detailed findings and collection diagnostics') ([bool]$extra) 'Saved text ignored Detailed selection.'
+            $json = [IO.File]::ReadAllText((Join-Path $saved[0].FullName 'report.json')) | ConvertFrom-Json
+            Assert-True (@($json.Findings | Where-Object { $_.Id -eq 'COLLECTION-INCOMPLETE' }).Count -gt 0) 'Compact display removed the full JSON finding.'
+        }
+    }
+
     Test-Case 'PassThru without a destination returns one unsaved report and no files' {
         $before = @(Get-ChildItem -LiteralPath $caseRoot -Force).Count
         $r = Invoke-TestCli '-PassThru | ConvertTo-Json -Depth 20 -Compress'

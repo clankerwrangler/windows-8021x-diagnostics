@@ -19,7 +19,7 @@ $oldTemp = $env:TEMP; $oldTmp = $env:TMP
 $allPassed = $true
 try {
     $env:TEMP = $ScratchPath; $env:TMP = $ScratchPath
-    foreach ($name in @('Test-Static.ps1','Test-Harness.ps1','Test-Rules.ps1','Test-ErrorCodes.ps1','Test-Xml.ps1','Test-Collection.ps1','Test-Process.ps1','Test-IO.ps1','Test-WiredOwnership.ps1')) {
+    foreach ($name in @('Test-Static.ps1','Test-Harness.ps1','Test-Rules.ps1','Test-ErrorCodes.ps1','Test-Report.ps1','Test-Xml.ps1','Test-Collection.ps1','Test-Process.ps1','Test-IO.ps1','Test-WiredOwnership.ps1')) {
         $code = '& ' + (ConvertTo-TestLiteral (Join-Path $PSScriptRoot $name)) + ' -ScriptPath ' + (ConvertTo-TestLiteral $ScriptPath)
         if ($name -in @('Test-Process.ps1','Test-IO.ps1','Test-WiredOwnership.ps1')) { $code += ' -ScratchPath ' + (ConvertTo-TestLiteral $ScratchPath) }
         $r = Invoke-TestPowerShell -Code $code -WorkingDirectory $ScratchPath -TimeoutSeconds 90
