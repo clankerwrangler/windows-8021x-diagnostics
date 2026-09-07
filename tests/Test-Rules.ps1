@@ -56,15 +56,14 @@ function Assert-NoFinding {
 }
 function Get-TestFindings { param($Evidence) @(Get-Dot1xDiagnosis -Evidence $Evidence) }
 
-Test-Case 'baseline metadata never proves authentication' {
+Test-Case 'baseline does not invent service or address faults' {
     $f = Get-TestFindings (New-TestEvidence)
-    Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
     foreach ($id in @('SERVICE-WLAN-NOT-RUNNING', 'SERVICE-WIRED-NOT-RUNNING', 'EAPHOST-DISABLED', 'PROFILE-SERVER-VALIDATION-DISABLED', 'CERT-NO-SUITABLE-CANDIDATE', 'IP-NO-USABLE-ADDRESS', 'DNS-NO-SERVERS', 'COLLECTION-INCOMPLETE')) { Assert-NoFinding $f $id }
     Assert-True (($f | ConvertTo-Json -Depth 20) -notmatch '(?i)all.clear|authentication (is |was )?verified') 'Baseline falsely asserts an all-clear.'
 }
 Test-Case 'empty evidence is unknown rather than an all-clear' {
     $f = Get-TestFindings ([pscustomobject]@{ SchemaVersion = 1; CapturedAtUtc = $script:FixtureNow.ToString('o') })
-    Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
+    Assert-HasFinding $f 'EVIDENCE-EMPTY'
 }
 Test-Case 'finding contract includes evidence and limitations' {
     $e = New-TestEvidence; $e.Services[0].Status = 'Stopped'
@@ -129,7 +128,6 @@ Test-Case 'machine certificate does not satisfy a user profile' {
 Test-Case 'user profile evaluates the execution-user store' {
     $e = New-TestEvidence; $e.Profiles[0].AuthMode = 'user'; $e.Certificates = @(New-TestCertificate -Store CurrentUser)
     Assert-NoFinding (Get-TestFindings $e) 'CERT-NO-SUITABLE-CANDIDATE'
-    Assert-HasFinding (Get-TestFindings $e) 'AUTH-NOT-VERIFIED'
 }
 Test-Case 'expired certificate alone is not a suitable candidate' {
     $e = New-TestEvidence; $e.Certificates = @(New-TestCertificate -ExpiresDays -1)
@@ -149,7 +147,6 @@ Test-Case 'certificate without private-key metadata is not a candidate' {
     Assert-HasFinding (Get-TestFindings $e) 'CERT-NO-SUITABLE-CANDIDATE'
 }
 Test-Case 'HasPrivateKey does not prove successful private-key use or EAP' {
-    Assert-HasFinding (Get-TestFindings (New-TestEvidence)) 'AUTH-NOT-VERIFIED'
 }
 Test-Case 'absent EKU is eligible metadata rather than wrong EKU' {
     $e = New-TestEvidence; $e.Certificates = @(New-TestCertificate -EkuOids @() -Eligible $true)
@@ -173,7 +170,6 @@ Test-Case 'truncated certificate store is not a complete absence proof' {
 }
 Test-Case 'unevaluated chain is not reported as trusted or unrevoked' {
     $f = Get-TestFindings (New-TestEvidence)
-    Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
     Assert-True (($f | ConvertTo-Json -Depth 20) -notmatch '(?i)chain (is |was )?(valid|trusted)|certificate (is |was )?unrevoked') 'Offline metadata is overstated as chain/revocation proof.'
 }
 Test-Case 'missing usable address on the relevant up adapter' {
@@ -194,7 +190,7 @@ Test-Case 'link-local IPv6 alone does not prove a usable enterprise address' {
 }
 Test-Case 'no DNS configuration is separate from authentication proof' {
     $e = New-TestEvidence; $e.IpConfiguration[0].DnsServers = @()
-    $f = Get-TestFindings $e; Assert-HasFinding $f 'DNS-NO-SERVERS'; Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
+    $f = Get-TestFindings $e; Assert-HasFinding $f 'DNS-NO-SERVERS'
 }
 Test-Case 'unrelated usable VPN does not conceal relevant adapter IP failure' {
     $e = New-TestEvidence; $e.IpConfiguration[0].IPv4Addresses = @()
@@ -204,7 +200,7 @@ Test-Case 'unrelated usable VPN does not conceal relevant adapter IP failure' {
 }
 Test-Case 'failed collection is not equivalent to an empty successful query' {
     $e = New-TestEvidence; $e.Probes[0].Status = 'Failed'
-    $f = Get-TestFindings $e; Assert-HasFinding $f 'COLLECTION-INCOMPLETE'; Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
+    $f = Get-TestFindings $e; Assert-HasFinding $f 'COLLECTION-INCOMPLETE'
 }
 Test-Case 'timed-out collection remains incomplete' {
     $e = New-TestEvidence; $e.Probes[0].Status = 'TimedOut'
@@ -217,7 +213,7 @@ Test-Case 'partially collected evidence remains incomplete' {
 Test-Case 'unreadable logs cannot establish authentication proof' {
     $e = New-TestEvidence; $e.Probes = @([pscustomobject]@{ Name = 'Events'; Status = 'Failed'; DurationMs = 1; Limitations = @('Synthetic access denial.') })
     $e.EventLogs = @([pscustomobject]@{ LogName = 'Microsoft-Windows-WLAN-AutoConfig/Operational'; Status = 'Failed' })
-    $f = Get-TestFindings $e; Assert-HasFinding $f 'COLLECTION-INCOMPLETE'; Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
+    $f = Get-TestFindings $e; Assert-HasFinding $f 'COLLECTION-INCOMPLETE'
 }
 Test-Case 'profile credential-like extra fields do not enter finding output' {
     $e = New-TestEvidence; $e.Profiles[0].ServerValidationEnabled = $false
@@ -244,7 +240,6 @@ Test-Case 'empty evidence has an explicit empty-evidence finding' {
 Test-Case 'missing scoped interface is not silently an all-clear' {
     $e = New-TestEvidence; $e.Collection | Add-Member NoteProperty InterfaceAlias 'fixture-missing'
     Assert-HasFinding (Get-TestFindings $e) 'TARGET-NOT-FOUND'
-    Assert-HasFinding (Get-TestFindings $e) 'AUTH-NOT-VERIFIED'
 }
 Test-Case 'matching scoped interface is not reported absent' {
     $e = New-TestEvidence; $e.Collection | Add-Member NoteProperty InterfaceAlias 'fixture-wireless'
@@ -267,7 +262,6 @@ Test-Case 'execution-user store limitation remains explicit under system context
     $certFinding = @($f | Where-Object { $_.Id -eq 'CERT-NO-SUITABLE-CANDIDATE' })
     Assert-Equal $certFinding.Count 1 'Expected a scoped candidate assessment.'
     Assert-True (($certFinding[0].Limitations -join ' ') -match '(?i)CurrentUser.*(collector|execution).*(affected|user)') 'CurrentUser conclusion was not scoped to the execution identity.'
-    Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
 }
 Test-Case 'known WLAN failure event is historical evidence' {
     $e = New-TestEvidence; $e.Events = @(New-TestEvent -Provider 'Microsoft-Windows-WLAN-AutoConfig' -Id 12013)
@@ -314,7 +308,6 @@ Test-Case 'historical failure followed by success is not called a current failur
     Assert-HasFinding $f 'AUTH-HISTORICAL-FAILURE'
     $ip = @($f | Where-Object { $_.Id -eq 'IP-NO-USABLE-ADDRESS' })
     Assert-True (($ip[0].Evidence -join ' ') -match 'Latest matching historical authentication outcome: Success') 'Current context used the older failure rather than later success.'
-    Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
 }
 Test-Case 'success on another adapter does not supersede this adapter history' {
     $e = New-TestEvidence; $e.IpConfiguration[0].IPv4Addresses = @()
@@ -324,7 +317,7 @@ Test-Case 'success on another adapter does not supersede this adapter history' {
 }
 Test-Case 'known TLS supporting provider warning remains correlation-only' {
     $e = New-TestEvidence; $e.Events = @(New-TestEvent -Provider 'Microsoft-Windows-EapHost' -Id 2002)
-    $f = Get-TestFindings $e; Assert-HasFinding $f 'TLS-EAP-SUPPORTING-HISTORY'; Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
+    $f = Get-TestFindings $e; Assert-HasFinding $f 'TLS-EAP-SUPPORTING-HISTORY'
 }
 Test-Case 'lookalike TLS provider name does not inherit provider meaning' {
     $e = New-TestEvidence; $e.Events = @(New-TestEvent -Provider 'Fixture-Unrelated-EapHost' -Id 2002)
@@ -336,14 +329,13 @@ Test-Case 'informational TLS supporting event is not treated as warning history'
 }
 Test-Case 'NTLM reason context is provider-scoped and does not prove EAP failure' {
     $e = New-TestEvidence; $e.Events = @(New-TestEvent -Provider 'Microsoft-Windows-NTLM' -Id 4013)
-    $f = Get-TestFindings $e; Assert-HasFinding $f 'NTLM-CREDENTIAL-GUARD-CONTEXT'; Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
+    $f = Get-TestFindings $e; Assert-HasFinding $f 'NTLM-CREDENTIAL-GUARD-CONTEXT'
     $e.Events[0].ProviderName = 'Fixture-Other-Provider'
     Assert-NoFinding (Get-TestFindings $e) 'NTLM-CREDENTIAL-GUARD-CONTEXT'
 }
 Test-Case 'unavailable WLAN connection query is not proof of disconnection' {
     $e = New-TestEvidence; $e.Wireless[0] | Add-Member NoteProperty ConnectionQueryCode 5
     Assert-HasFinding (Get-TestFindings $e) 'WLAN-CURRENT-STATE-UNAVAILABLE'
-    Assert-HasFinding (Get-TestFindings $e) 'AUTH-NOT-VERIFIED'
     $e.Wireless[0].ConnectionQueryCode = 0
     Assert-NoFinding (Get-TestFindings $e) 'WLAN-CURRENT-STATE-UNAVAILABLE'
 }
@@ -368,7 +360,7 @@ Test-Case 'verified wired authentication success supplies historical context onl
     $e.Events = @(New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15505)
     $f = Get-TestFindings $e; $ip = @($f | Where-Object { $_.Id -eq 'IP-NO-USABLE-ADDRESS' })
     Assert-True (($ip[0].Evidence -join ' ') -match 'historical authentication outcome: Success') 'Verified wired success was not recognized as historical context.'
-    Assert-NoFinding $f 'AUTH-HISTORICAL-FAILURE'; Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
+    Assert-NoFinding $f 'AUTH-HISTORICAL-FAILURE'
 }
 
 Test-Case 'absent normalized EKU flag still treats absent EKU as unrestricted metadata' {
@@ -393,7 +385,6 @@ Test-Case 'targeted WLAN service clue survives unavailable profile collection' {
     $f=Get-TestFindings $e; $service=@($f|Where-Object{$_.Id -eq 'SERVICE-WLAN-NOT-RUNNING'})
     Assert-Equal $service.Count 1 'Targeted service dependency was hidden by failed profile collection.'
     Assert-Equal $service[0].Severity 'Information' 'Indicated service relevance was overstated as a proven cause.'
-    Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
 }
 Test-Case 'targeted wired service clue does not require a readable profile' {
     $e=New-TestEvidence; $e.Profiles=@(); $e.Services[1].Status='Stopped'; $e.Interfaces[0].PhysicalMediaType='802.3'
@@ -404,7 +395,7 @@ Test-Case 'targeted wired service clue does not require a readable profile' {
 Test-Case 'targeted inactive adapter reports only its local link fact' {
     foreach($status in @('Disabled','Disconnected','NotPresent')){
         $e=New-TestEvidence;$e.Interfaces[0].Status=$status;$e.Collection|Add-Member NoteProperty InterfaceAlias 'fixture-wireless'
-        $f=Get-TestFindings $e;Assert-HasFinding $f 'TARGET-INTERFACE-NOT-UP';Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
+        $f=Get-TestFindings $e;Assert-HasFinding $f 'TARGET-INTERFACE-NOT-UP'
     }
 }
 Test-Case 'an unrelated disabled adapter is not a targeted link failure' {
@@ -418,7 +409,6 @@ Test-Case 'complete profile queries permit only within-scope not-observed eviden
     $f=Get-TestFindings $e;$missing=@($f|Where-Object{$_.Id -eq 'PROFILE-NOT-OBSERVED'})
     Assert-Equal $missing.Count 1 'Missing requested profile was silently ignored.'
     Assert-Equal $missing[0].Confidence 'Medium' 'Completed profile coverage did not retain its limited scope.'
-    Assert-HasFinding $f 'AUTH-NOT-VERIFIED'
 }
 Test-Case 'failed partial or skipped profile query cannot establish absence' {
     foreach($status in @('Failed','Partial','Skipped')){

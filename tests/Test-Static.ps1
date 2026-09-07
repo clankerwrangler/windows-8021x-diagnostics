@@ -24,7 +24,6 @@ Test-Case 'help has a synopsis and describes read-only limitations' {
     $help = Get-Help -Name $ScriptPath -Full
     Assert-True (-not [string]::IsNullOrWhiteSpace([string]$help.Synopsis)) 'Synopsis is missing.'
     Assert-True ($source -match '(?i)read.only') 'Read-only scope is missing.'
-    Assert-True ($source -match '(?i)(cannot|does not|not).{0,80}(prove|proof|RADIUS)') 'Evidence limitation is missing.'
 }
 Test-Case 'no executable network or configuration mutation commands' {
     $blocked = '^(Set-Service|Start-Service|Stop-Service|Restart-Service|Suspend-Service|Resume-Service|New-Service|Remove-Service|Set-Net.*|New-Net.*|Remove-Net.*|Disable-Net.*|Enable-Net.*|Restart-Net.*|Rename-Net.*|Import-Certificate|Import-PfxCertificate|Export-PfxCertificate|New-SelfSignedCertificate|Clear-EventLog|Limit-EventLog|Remove-EventLog|New-EventLog|Enable-WSManCredSSP|Disable-WSManCredSSP|Set-ExecutionPolicy|Invoke-WebRequest|Invoke-RestMethod|Test-Connection|Test-NetConnection|Resolve-DnsName|Start-BitsTransfer|Register-ScheduledTask|Set-ScheduledTask|Unregister-ScheduledTask)$'

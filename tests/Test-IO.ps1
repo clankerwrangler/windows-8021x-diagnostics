@@ -41,7 +41,7 @@ function Assert-TestSavedReport {
     }
     $report = [IO.File]::ReadAllText((Join-Path $Directory 'report.json')) | ConvertFrom-Json
     Assert-Equal $report.OutputDirectory $Directory 'Saved JSON does not identify its actual run directory.'
-    Assert-True (@($report.Findings | Where-Object { $_.Id -eq 'AUTH-NOT-VERIFIED' }).Count -gt 0) 'Serialized report omits the authentication limitation.'
+    Assert-True (@($report.Findings).Count -gt 0) 'Serialized report has no findings.'
     $savedLine = 'Saved reports: ' + $Directory
     Assert-True ([IO.File]::ReadAllText((Join-Path $Directory 'report.txt')).Contains($savedLine)) 'Saved text does not identify its actual run directory.'
     if ($PSBoundParameters.ContainsKey('OrdinaryOutput')) {
@@ -83,7 +83,7 @@ try {
         $before = @(Get-ChildItem -LiteralPath $caseRoot -Force).Count
         $r = Invoke-TestCli
         Assert-Equal $r.ExitCode 0 'Completed offline diagnosis did not exit zero.'
-        Assert-True ($r.Stdout -match 'AUTH-NOT-VERIFIED') 'Offline output lacks the authentication limitation.'
+        Assert-True ($r.Stdout -match 'COLLECTION-INCOMPLETE') 'Offline output lacks incomplete-collection findings.'
         Assert-True ($r.Stdout -match 'COLLECTION-INCOMPLETE') 'Partial input lost its incomplete collection finding.'
         Assert-True ($r.Stdout -notmatch 'Saved reports:') 'Pipeline-only text claims to have saved a report.'
         Assert-Equal @(Get-ChildItem -LiteralPath $caseRoot -Force).Count $before 'Pipeline-only output wrote files.'

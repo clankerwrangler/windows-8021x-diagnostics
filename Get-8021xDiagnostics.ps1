@@ -4,9 +4,8 @@
 Collects bounded, read-only Windows wired and wireless 802.1X evidence.
 .DESCRIPTION
 Requires Windows PowerShell 5.1 and components that ship with Windows 10/11.
-Does not change services, profiles, network state, tracing, or trust settings.
-Reports contain sensitive network configuration. Collection is minimized, not
-universally redacted. Dot-source this file to load the offline rules functions.
+Read-only collection. Reports can include private network details.
+Dot-source this file to load the offline rules functions.
 .PARAMETER EvidencePath
 Read a bounded synthetic evidence JSON file instead of collecting host data.
 .PARAMETER OutputDirectory
@@ -190,13 +189,13 @@ function Get-Dot1xDiagnosis {
         Add-Dot1xFinding $findings 'COLLECTION-INCOMPLETE' 'Warning' 'High' 'Collection' `
             'Some evidence is unavailable or incomplete.' `
             @($incomplete | ForEach-Object { '{0}: {1}' -f (Get-Dot1xValue $_ 'Name'), (Get-Dot1xValue $_ 'Status') }) `
-            @('Review probe limitations. If authorized, rerun in the affected user context or elevated context where access is required.') `
-            @('Missing evidence is not a successful test. Elevation does not grant visibility into every user profile or certificate store.')
+            @('Rerun elevated in the affected user context if a probe was denied access.') `
+            @()
     }
     if ($probes.Count -eq 0 -and $profiles.Count -eq 0 -and $interfaces.Count -eq 0) {
         Add-Dot1xFinding $findings 'EVIDENCE-EMPTY' 'Information' 'High' 'Collection' `
             'No interface or profile evidence is available.' @('Evidence arrays are missing or empty.') `
-            @('Collect evidence on the affected Windows endpoint in the affected user context.') @('No healthy or failed authentication conclusion is possible.')
+            @('Run the collector on the affected Windows endpoint.') @()
     }
     $targetAlias = [string](Get-Dot1xValue $collection 'InterfaceAlias')
     $targetProfile = [string](Get-Dot1xValue $collection 'ProfileName')
@@ -382,8 +381,8 @@ function Get-Dot1xDiagnosis {
                 Add-Dot1xFinding $findings 'AUTH-HISTORICAL-FAILURE' 'Warning' 'High' 'Authentication history' `
                     $summary `
                     @("Provider=$provider; event=$id; record=$(Get-Dot1xValue $e 'RecordId'); UTC=$(Get-Dot1xValue $e 'TimeCreatedUtc'); interface=$(Get-Dot1xValue $e 'InterfaceGuid')", ('Fields: ' + ((Get-Dot1xValue $e 'Fields' @{}) | ConvertTo-Json -Compress -Depth 5))) `
-                    @('Use the decoded ONEX reason and HRESULT as client-side TLS/EAP evidence. Correlate the timestamp, interface, and profile with authorized RADIUS/NPS and switch/AP logs.') `
-                    @('History does not prove a current failure. Named constants are endpoint codes, not a RADIUS policy, shared secret, VLAN, or reachability verdict. Unmapped codes stay unmapped.')
+                    @('Fix the named trust, server-name, credential, or client-certificate error, then reconnect.') `
+                    @()
             }
         }
     }
@@ -436,7 +435,7 @@ function Get-Dot1xDiagnosis {
         $authContext = 'Current 802.1X authorization is unknown.'
         if ($matchingHistory.Count -gt 0) {
             $last = $matchingHistory[0]
-            $authContext = 'Latest matching historical authentication outcome: {0}, UTC {1}; this is not current authorization proof.' -f $last.Outcome, (Get-Dot1xValue $last.Event 'TimeCreatedUtc')
+            $authContext = 'Latest matching authentication outcome: {0}, UTC {1}.' -f $last.Outcome, (Get-Dot1xValue $last.Event 'TimeCreatedUtc')
         }
         if ($usable.Count -eq 0) {
             Add-Dot1xFinding $findings 'IP-NO-USABLE-ADDRESS' 'Warning' 'High' 'IP configuration' `
@@ -451,11 +450,6 @@ function Get-Dot1xDiagnosis {
                 @('This is configuration evidence, not a DNS resolution test. Cached names, alternate resolvers, and local-only designs are not assessed.')
         }
     }
-    Add-Dot1xFinding $findings 'AUTH-NOT-VERIFIED' 'Information' 'High' 'Scope' `
-        'End-to-end 802.1X authentication and RADIUS server-side causes are not proven by this snapshot.' `
-        @("802.1X profiles=$($enterpriseProfiles.Count); recognized historical authentication events=$($authEvents.Count)") `
-        @('For an affected attempt, correlate endpoint timestamps and interface/profile identifiers with authorized authenticator and RADIUS logs. Compare the expected EAP method, identity context, policy, certificate mapping, and resulting VLAN.') `
-        @('No connection, reauthentication, credential test, DNS query, reachability probe, packet capture, or RADIUS request was sent. CurrentUser is the execution identity. Nonenterprise or unattached test hosts cannot validate a real enterprise deployment.')
     return $findings.ToArray()
 }
 

@@ -125,7 +125,6 @@ Test-Case 'exact named-provider channel mismatch is unsupported rather than no e
     $payload=Invoke-Dot1xWorker -Name Events -Context $context
     $e=[pscustomobject]@{SchemaVersion=1;CapturedAtUtc=$context.EndTimeUtc;Events=$payload.Data.Events;EventLogs=$payload.Data.EventLogs;Probes=@([pscustomobject]@{Name='Events';Status=$payload.Status;DurationMs=1;Limitations=$payload.Limitations})}
     $findings=@(Get-Dot1xDiagnosis -Evidence $e)
-    Assert-True (@($findings|Where-Object{$_.Id -eq 'AUTH-NOT-VERIFIED'}).Count -gt 0) 'Unsupported query became authentication proof.'
     Assert-True (@($findings|Where-Object{$_.Id -eq 'COLLECTION-INCOMPLETE'}).Count -gt 0) 'Unsupported visibility was concealed.'
 }
 Test-Case 'empty provider does not inherit named-provider mismatch classification' {

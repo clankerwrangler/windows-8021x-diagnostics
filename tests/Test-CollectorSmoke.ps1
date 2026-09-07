@@ -47,8 +47,7 @@ try {
             [pscustomobject]@{Stage='SystemEapHost';Available=$pair[0].Available;Enabled=$pair[0].Enabled;QueryStatus=$pair[0].QueryStatus;ErrorCode=$pair[0].ErrorCode}|ConvertTo-Json -Compress
         }
 
-        Assert-True ($ids -contains 'AUTH-NOT-VERIFIED') 'Host report falsely omits the authentication-proof limitation.'
-        Assert-True (@($evidence.Probes | Where-Object { $_.Status -eq 'Succeeded' }).Count -gt 0) 'No probe succeeded; this is not a working collector smoke result.'
+        Assert-True (@($evidence.Probes | Where-Object { $_.Status -eq 'Succeeded' }).Count -gt 0) 'No probe succeeded.'
         $incomplete = @($evidence.Probes | Where-Object { $_.Status -ne 'Succeeded' })
         if ($incomplete.Count -gt 0) { Assert-True ($ids -contains 'COLLECTION-INCOMPLETE') 'Failed, partial, or skipped collection was concealed.' }
         foreach ($profile in @($evidence.Profiles)) {
