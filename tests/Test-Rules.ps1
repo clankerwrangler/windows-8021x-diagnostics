@@ -56,7 +56,12 @@ function Assert-NoFinding {
     $rows = @(@($Findings) | Where-Object { $null -ne $_ -and $_.Id -eq $Id })
     Assert-Equal $rows.Count 0 ('Unexpected finding ' + $Id + '.')
 }
-function Get-TestFindings { param($Evidence) @(@(Get-Dot1xDiagnosis -Evidence $Evidence) | Where-Object { $null -ne $_ }) }
+function Get-TestFindings {
+    param($Evidence)
+    $raw = Get-Dot1xDiagnosis -Evidence $Evidence
+    if ($null -eq $raw) { return @() }
+    return @($raw)
+}
 
 Test-Case 'baseline does not invent service or address faults' {
     $f = Get-TestFindings (New-TestEvidence)
