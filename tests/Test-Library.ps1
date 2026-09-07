@@ -4,9 +4,11 @@ $ErrorActionPreference = 'Stop'
 $script:Passed = 0
 $script:Failed = 0
 $script:FailedNames = @()
+$script:AssertionCount = 0
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
+    $script:AssertionCount++
     if (-not $Condition) { throw ('ASSERT: ' + $Message) }
 }
 
@@ -15,10 +17,17 @@ function Assert-Equal {
     Assert-True ($Actual -eq $Expected) $Message
 }
 
+function Invoke-TestCaseBody {
+    param([scriptblock]$Body)
+    $before = $script:AssertionCount
+    & $Body
+    if ($script:AssertionCount -eq $before) { throw 'ASSERT: Test case executed no assertions.' }
+}
+
 function Test-Case {
     param([string]$Name, [scriptblock]$Body)
     try {
-        & $Body
+        Invoke-TestCaseBody $Body
         $script:Passed++
         Write-Output ('PASS ' + $Name)
     } catch {

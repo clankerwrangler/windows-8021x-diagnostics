@@ -1,0 +1,49 @@
+name: Windows PowerShell 5.1 tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run synthetic suite
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5) {
+            throw 'This job must execute in Windows PowerShell 5.1.'
+          }
+          $scriptPath = Join-Path $PWD 'Get-8021xDiagnostics.ps1'
+          . $scriptPath
+          $lease = New-Dot1xPrivateDirectory -Path (Join-Path $env:RUNNER_TEMP ('dot1x-ci-' + [guid]::NewGuid().ToString('N')))
+          $scratch = $lease.Path
+          $lease.Dispose()
+          $resultPath = Join-Path $env:RUNNER_TEMP 'dot1x-synthetic-results.log'
+          $receipt = 'CI commit=' + $env:GITHUB_SHA + ' utc=' + [datetime]::UtcNow.ToString('o')
+          $receipt | Tee-Object -FilePath $resultPath
+          $exitCode = 1
+          try {
+            & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1 -ScriptPath $scriptPath -ScratchPath $scratch 2>&1 | Tee-Object -FilePath $resultPath -Append
+            $exitCode = $LASTEXITCODE
+          } finally {
+            Remove-Item -LiteralPath $scratch -Recurse -Force
+          }
+          exit $exitCode
+      - name: Upload synthetic test receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-powershell-51-synthetic-results
+          path: ${{ runner.temp }}/dot1x-synthetic-results.log
+          if-no-files-found: warn
+          retention-days: 14

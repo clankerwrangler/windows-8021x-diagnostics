@@ -1,8 +1,10 @@
-# Verified test results
+# Recorded test results
+
+The review fixes prepared against commit `39a7273bd4acf07df07ebbd7eff45c730696c5b1` have **not been executed on Windows**. The figures below are historical results for the listed source hashes, not validation of later changes. New CI runs record their tested commit, source SHA-256, UTC time, Windows version, and PowerShell runtime.
 
 Tests ran on Windows 11 IoT Enterprise LTSC (`10.0.26100.0`) with Windows PowerShell `5.1.26100.9278`. They use built-in assertions; no Pester or additional packages are required.
 
-## Current revision: output destination changes
+## Historical run: output destination changes
 
 Source SHA-256: `b5a43716734da2b318357a5918f9e0216a87fcd65070a8aeab9515327dd5c96c`.
 
@@ -18,7 +20,7 @@ All suites exited `0`; none timed out. Tests verified reusable output destinatio
 
 This was a focused synthetic regression, not a complete-suite or live collector run on this revision. The optional smoke test's output-path update was parse-checked but not executed.
 
-## Previous revision: complete suite
+## Historical run: complete suite
 
 Source SHA-256: `238db21095b1ce43d50f9126ee6a38d97e809481cf3be293f277f6090bf80c16`.
 

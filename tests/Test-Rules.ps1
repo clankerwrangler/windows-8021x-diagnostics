@@ -147,6 +147,13 @@ Test-Case 'certificate without private-key metadata is not a candidate' {
     Assert-HasFinding (Get-TestFindings $e) 'CERT-NO-SUITABLE-CANDIDATE'
 }
 Test-Case 'HasPrivateKey does not prove successful private-key use or EAP' {
+    $e = New-TestEvidence
+    $e.Certificates[0].HasPrivateKey = $true
+    $f = Get-TestFindings $e
+    $candidate = @($f | Where-Object { $_.Id -eq 'CERT-CANDIDATES-PRESENT' })
+    Assert-Equal $candidate.Count 1 'Expected a structural candidate, not authentication proof.'
+    Assert-True (($candidate[0].Limitations -join ' ') -match 'HasPrivateKey.*presence only') 'Key-presence limitation was lost.'
+    Assert-True (($f.Summary -join ' ') -notmatch '(?i)(key (is )?usable|authentication (succeeded|verified))') 'Key metadata became a successful operation or authentication verdict.'
 }
 Test-Case 'absent EKU is eligible metadata rather than wrong EKU' {
     $e = New-TestEvidence; $e.Certificates = @(New-TestCertificate -EkuOids @() -Eligible $true)
@@ -307,13 +314,15 @@ Test-Case 'historical failure followed by success is not called a current failur
     $f = Get-TestFindings $e
     Assert-HasFinding $f 'AUTH-HISTORICAL-FAILURE'
     $ip = @($f | Where-Object { $_.Id -eq 'IP-NO-USABLE-ADDRESS' })
-    Assert-True (($ip[0].Evidence -join ' ') -match 'Latest matching historical authentication outcome: Success') 'Current context used the older failure rather than later success.'
+    Assert-Equal $ip[0].AuthenticationContext.Outcome 'Success' 'Current context used the older failure rather than later success.'
+    Assert-Equal $ip[0].AuthenticationContext.IsHistorical $true 'A historical success became current authorization.'
 }
 Test-Case 'success on another adapter does not supersede this adapter history' {
     $e = New-TestEvidence; $e.IpConfiguration[0].IPv4Addresses = @()
     $e.Events = @((New-TestEvent -Id 12013 -MinutesAgo 60 -Guid $script:GuidA), (New-TestEvent -Id 12012 -MinutesAgo 10 -Guid $script:GuidB))
     $f = Get-TestFindings $e; $ip = @($f | Where-Object { $_.Id -eq 'IP-NO-USABLE-ADDRESS' })
-    Assert-True (($ip[0].Evidence -join ' ') -match 'Latest matching historical authentication outcome: Failure') 'Another adapter success concealed the matching failure history.'
+    Assert-Equal $ip[0].AuthenticationContext.Outcome 'Failure' 'Another adapter success concealed the matching failure history.'
+    Assert-Equal $ip[0].AuthenticationContext.InterfaceGuid $script:GuidA 'History was attributed to another adapter.'
 }
 Test-Case 'known TLS supporting provider warning remains correlation-only' {
     $e = New-TestEvidence; $e.Events = @(New-TestEvent -Provider 'Microsoft-Windows-EapHost' -Id 2002)
@@ -344,7 +353,7 @@ Test-Case 'wired adapter-connected event is not authentication success' {
     $e = New-TestEvidence; $e.IpConfiguration[0].IPv4Addresses = @()
     $e.Events = @(New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15501)
     $f = Get-TestFindings $e; $ip = @($f | Where-Object { $_.Id -eq 'IP-NO-USABLE-ADDRESS' })
-    Assert-True (($ip[0].Evidence -join ' ') -notmatch 'historical authentication outcome: Success') 'Adapter-connected event was interpreted as authentication success.'
+    Assert-True ($null -eq $ip[0].AuthenticationContext) 'Adapter-connected event was interpreted as authentication success.'
 }
 Test-Case 'wired profile-applied event is not authentication failure' {
     $e = New-TestEvidence; $e.Events = @(New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15502)
@@ -359,7 +368,8 @@ Test-Case 'verified wired authentication success supplies historical context onl
     $e = New-TestEvidence; $e.IpConfiguration[0].IPv4Addresses = @()
     $e.Events = @(New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15505)
     $f = Get-TestFindings $e; $ip = @($f | Where-Object { $_.Id -eq 'IP-NO-USABLE-ADDRESS' })
-    Assert-True (($ip[0].Evidence -join ' ') -match 'historical authentication outcome: Success') 'Verified wired success was not recognized as historical context.'
+    Assert-Equal $ip[0].AuthenticationContext.Outcome 'Success' 'Verified wired success was not recognized as historical context.'
+    Assert-Equal $ip[0].AuthenticationContext.IsHistorical $true 'Wired history became current authorization.'
     Assert-NoFinding $f 'AUTH-HISTORICAL-FAILURE'
 }
 
@@ -457,19 +467,20 @@ Test-Case 'high-bit HRESULT literals still match CERT_E_UNTRUSTEDROOT' {
     Assert-True ((Get-Dot1xHresultLabel ([Convert]::ToUInt32('800B0109',16))) -match 'CERT_E_UNTRUSTEDROOT') '0x800B0109 did not decode.'
     Assert-True ((Get-Dot1xHresultLabel ([Convert]::ToUInt32('80092013',16))) -match 'CRYPT_E_REVOCATION_OFFLINE') '0x80092013 did not decode.'
 }
-Test-Case 'wired name-mismatch and credential failure codes are named' {
+Test-Case 'name-constraint credential and identity codes retain distinct reference labels' {
     $e = New-TestEvidence
     $name = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514
     $name.Fields = [pscustomobject]@{ ErrorCode = '0x800b0114' }
     $cred = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514 -MinutesAgo 20
     $cred.Fields = [pscustomobject]@{ ErrorCode = '0x2b3' }
-    $nocert = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514 -MinutesAgo 10
-    $nocert.Fields = [pscustomobject]@{ ErrorCode = '0x80420014' }
-    $e.Events = @($name,$cred,$nocert)
+    $identityFailure = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514 -MinutesAgo 10
+    $identityFailure.Fields = [pscustomobject]@{ ErrorCode = '0x80420014' }
+    $e.Events = @($name,$cred,$identityFailure)
     $text = @((Get-TestFindings $e | Where-Object { $_.Id -eq 'AUTH-HISTORICAL-FAILURE' }).Summary) -join ' | '
-    Assert-True ($text -match 'CERT_E_INVALID_NAME') 'Server-name HRESULT was not named.'
-    Assert-True ($text -match 'ERROR_AUTH_INTERNAL') 'RAS credential error 691 was not named.'
-    Assert-True ($text -match '80420014') 'Missing-client-cert EAPHost code was not named.'
+    Assert-True ($text -match 'CERT_E_INVALID_NAME') 'Certificate name-constraint HRESULT was not named.'
+    Assert-True ($text -match 'ERROR_AUTHENTICATION_FAILURE') 'RAS credential error 691 was not named.'
+    Assert-True ($text -match 'EAP_E_EAPHOST_IDENTITY_UNKNOWN') 'EAP peer-identity failure was not named.'
+    Assert-True ($text -notmatch 'EAP_E_USER_CERT_NOT_FOUND|no certificate could be found') 'Identity failure was relabeled as certificate absence.'
 }
 
 Complete-Tests

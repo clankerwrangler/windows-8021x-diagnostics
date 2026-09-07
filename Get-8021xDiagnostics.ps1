@@ -18,7 +18,8 @@ Offline -EvidencePath without a destination still prints to the pipeline only.
 Include up to 2048 characters of each event message. Live collection includes
 messages by default. Messages can contain identities.
 .PARAMETER OmitEventMessages
-Skip event messages on a live run. Use this when identities must stay out of the report.
+Omit rendered event messages on a live run. Profile names, server names,
+certificate identifiers, addresses, and saved paths can still identify users or networks.
 .PARAMETER InterfaceAlias
 Limit interface-related collection and findings to this exact adapter alias.
 .PARAMETER ProfileName
@@ -77,7 +78,7 @@ function ConvertTo-Dot1xUInt32 {
         }
         $signed = 0
         if ([int]::TryParse($text, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$signed)) {
-            return [uint32]$signed
+            return [BitConverter]::ToUInt32([BitConverter]::GetBytes($signed), 0)
         }
     } catch { }
     return $null
@@ -104,55 +105,93 @@ function Get-Dot1xOnexReasonLabel {
 
 function Get-Dot1xHresultLabel {
     param([uint32]$Code)
+    # Constant references and namespace limits: docs/error-codes.md.
     # PowerShell 5.1 sign-extends 0x80000000+ hex literals to Int32, so match on hex text.
     switch (('{0:X8}' -f $Code)) {
-        '000002B3' { return 'ERROR_AUTH_INTERNAL: the user name or password was not accepted' }
-        '800B0101' { return 'CERT_E_EXPIRED: a certificate in the chain is expired' }
+        '800B0101' { return 'CERT_E_EXPIRED: a certificate is expired or not yet valid' }
         '800B0109' { return 'CERT_E_UNTRUSTEDROOT: the chain ended in an untrusted root' }
         '800B010A' { return 'CERT_E_CHAINING: a chain could not be built to a trusted root' }
         '800B010C' { return 'CERT_E_REVOKED: a certificate in the chain is revoked' }
         '800B010E' { return 'CERT_E_REVOCATION_FAILURE: revocation checking failed' }
         '800B010F' { return 'CERT_E_CN_NO_MATCH: the certificate name did not match the expected name' }
         '800B0110' { return 'CERT_E_WRONG_USAGE: the certificate is not valid for this use' }
-        '800B0114' { return 'CERT_E_INVALID_NAME: the certificate name did not match the expected server name' }
+        '800B0114' { return 'CERT_E_INVALID_NAME: a certificate name is excluded or outside the permitted name constraints' }
         '80092012' { return 'CRYPT_E_NO_REVOCATION_CHECK: no revocation check was performed' }
         '80092013' { return 'CRYPT_E_REVOCATION_OFFLINE: revocation check timed out or the responder was unreachable' }
         '8009030C' { return 'SEC_E_LOGON_DENIED: the logon was denied' }
         '8009030E' { return 'SEC_E_NO_CREDENTIALS: no credentials were available' }
-        '80090317' { return 'SEC_E_UNKNOWN_CREDENTIALS: the credentials were not recognized' }
-        '80090325' { return 'SEC_E_CERT_UNKNOWN: the peer certificate was not recognized' }
+        '8009030D' { return 'SEC_E_UNKNOWN_CREDENTIALS: the credentials were not recognized' }
+        '80090317' { return 'SEC_E_CONTEXT_EXPIRED: the security context has expired' }
+        '80090325' { return 'SEC_E_UNTRUSTED_ROOT: the certificate chain has an untrusted issuing authority' }
+        '80090327' { return 'SEC_E_CERT_UNKNOWN: an unspecified certificate-processing error occurred' }
         '80090326' { return 'SEC_E_ILLEGAL_MESSAGE: TLS received an illegal message' }
         '80090328' { return 'SEC_E_CERT_EXPIRED: the peer certificate is expired' }
         '80090331' { return 'SEC_E_ALGORITHM_MISMATCH: TLS algorithm mismatch' }
         '80090016' { return 'NTE_BAD_KEYSET: the private key was not available' }
-        '80420014' { return 'EAPHost 0x80420014: no certificate could be found for this EAP method' }
+        '80420014' { return 'EAP_E_EAPHOST_IDENTITY_UNKNOWN: authentication failed after the peer identity was submitted' }
+        '80420100' { return 'EAP_E_USER_CERT_NOT_FOUND: the required user certificate was not found' }
         default { return $null }
+    }
+}
+
+function Get-Dot1xRasErrorLabel {
+    param([uint32]$Code)
+    if ($Code -eq 691) { return 'ERROR_AUTHENTICATION_FAILURE: the user name or password was not accepted' }
+    return $null
+}
+
+function Get-Dot1xEventCodeDetails {
+    param($Event)
+    $fields = Get-Dot1xValue $Event 'Fields' @{}
+    $provider = [string](Get-Dot1xValue $Event 'ProviderName')
+    $id = Get-Dot1xValue $Event 'Id'
+    $recognizedFailure = ($provider -eq 'Microsoft-Windows-WLAN-AutoConfig' -and $id -eq 12013) -or
+        ($provider -eq 'Microsoft-Windows-Wired-AutoConfig' -and $id -eq 15514)
+    foreach ($name in @('ReasonCode','ErrorCode','ResultCode','EapErrorCode','FailureReasonCode','EapReasonCode')) {
+        $raw = Get-Dot1xValue $fields $name
+        if ($null -eq $raw -or [string]::IsNullOrWhiteSpace([string]$raw)) { continue }
+        $code = ConvertTo-Dot1xUInt32 $raw
+        $hex = $null; $label = $null; $candidateNamespace = $null
+        $status = 'NotNumeric'
+        if ($null -ne $code) {
+            $hex = '0x{0:X8}' -f $code
+            $status = 'Unmapped'
+            if ($recognizedFailure) {
+                if ($name -eq 'ReasonCode') {
+                    $label = Get-Dot1xOnexReasonLabel $code
+                    if ($label) { $candidateNamespace = 'ONEX' }
+                } elseif ($name -in @('ErrorCode','ResultCode','EapErrorCode')) {
+                    $label = Get-Dot1xHresultLabel $code
+                    if ($label) { $candidateNamespace = 'HRESULT' }
+                    else {
+                        $label = Get-Dot1xRasErrorLabel $code
+                        if ($label) { $candidateNamespace = 'RAS' }
+                    }
+                }
+            }
+            if ($label) { $status = 'UnverifiedNumericMatch' }
+        }
+        # A constant match is not an event-field contract. No provider/version/field
+        # contract is verified yet; keep Namespace unknown even when a label exists.
+        [pscustomobject][ordered]@{
+            ProviderName=$provider; EventId=$id; EventVersion=(Get-Dot1xValue $Event 'Version')
+            Field=$name; RawValue=[string]$raw; HexValue=$hex; Namespace='Unknown'
+            MappingStatus=$status; CandidateNamespace=$candidateNamespace; CandidateLabel=$label
+        }
     }
 }
 
 function Get-Dot1xAuthFailureSummary {
     param($Event, [string]$Provider, $Id)
-    $fields = Get-Dot1xValue $Event 'Fields' @{}
     $parts = New-Object 'System.Collections.Generic.List[string]'
     $parts.Add("$Provider event $Id reports a historical 802.1X failure.")
-    $reasonRaw = Get-Dot1xValue $fields 'ReasonCode'
-    $reason = ConvertTo-Dot1xUInt32 $reasonRaw
-    if ($null -ne $reason) {
-        $label = Get-Dot1xOnexReasonLabel $reason
-        $hex = '0x{0:X8}' -f $reason
-        if ($label) { $parts.Add("ONEX $hex $label.") }
-        else { $parts.Add("ONEX/reason $hex is retained; this value is not in the documented decoder table.") }
-    } elseif ($reasonRaw) {
-        $parts.Add("ReasonCode=$reasonRaw")
-    }
-    foreach ($name in @('ErrorCode','ResultCode','EapErrorCode')) {
-        $raw = Get-Dot1xValue $fields $name
-        $code = ConvertTo-Dot1xUInt32 $raw
-        if ($null -eq $code) { continue }
-        $label = Get-Dot1xHresultLabel $code
-        $hex = '0x{0:X8}' -f $code
-        if ($label) { $parts.Add("$name $hex $label.") }
-        else { $parts.Add("$name $hex is retained as an unmapped HRESULT.") }
+    foreach ($detail in @(Get-Dot1xEventCodeDetails $Event)) {
+        if ($detail.MappingStatus -eq 'UnverifiedNumericMatch') {
+            $parts.Add(('{0} {1}; numeric match in {2}: {3} (field namespace unverified).' -f
+                $detail.Field,$detail.HexValue,$detail.CandidateNamespace,$detail.CandidateLabel))
+        } elseif ($detail.HexValue) {
+            $parts.Add(('{0} {1} is retained as an unmapped numeric code.' -f $detail.Field,$detail.HexValue))
+        } else { $parts.Add(('{0}={1}' -f $detail.Field,$detail.RawValue)) }
     }
     return ($parts -join ' ')
 }
@@ -161,11 +200,11 @@ function Add-Dot1xFinding {
     param([System.Collections.Generic.List[object]]$List, [string]$Id,
           [string]$Severity, [string]$Confidence, [string]$Category,
           [string]$Summary, [string[]]$Evidence, [string[]]$Remediation,
-          [string[]]$Limitations)
+          [string[]]$Limitations, $AuthenticationContext = $null)
     $List.Add([pscustomobject][ordered]@{
         Id=$Id; Severity=$Severity; Confidence=$Confidence; Category=$Category
         Summary=$Summary; Evidence=@($Evidence); Remediation=@($Remediation)
-        Limitations=@($Limitations)
+        Limitations=@($Limitations); AuthenticationContext=$AuthenticationContext
     })
 }
 
@@ -189,7 +228,7 @@ function Get-Dot1xDiagnosis {
         Add-Dot1xFinding $findings 'COLLECTION-INCOMPLETE' 'Warning' 'High' 'Collection' `
             'Some evidence is unavailable or incomplete.' `
             @($incomplete | ForEach-Object { '{0}: {1}' -f (Get-Dot1xValue $_ 'Name'), (Get-Dot1xValue $_ 'Status') }) `
-            @('Rerun elevated in the affected user context if a probe was denied access.') `
+            @('Check the failed probe details. For access-denied results, collect in the affected user context and elevate that account where possible.') `
             @()
     }
     if ($probes.Count -eq 0 -and $profiles.Count -eq 0 -and $interfaces.Count -eq 0) {
@@ -274,14 +313,14 @@ function Get-Dot1xDiagnosis {
                 }
                 Add-Dot1xFinding $findings $id $serviceSeverity $serviceConfidence 'Services' `
                     $serviceSummary @("Status=$status; start mode=$start; targeted interface=$targetAlias") `
-                    @('Ask the endpoint administrator whether this connection requires AutoConfig, and review the service policy, dependencies, and service events before an approved repair.') `
+                    @('Confirm that the target connection requires AutoConfig, then check the service start mode, dependencies, and service events.') `
                     @('Stopped AutoConfig can itself prevent profile enumeration. Nonenterprise wired operation might not need dot3svc. A stored profile might not be the attempted connection. This does not identify a RADIUS cause.')
             }
         }
         if ($name -eq 'EapHost' -and $start -eq 'Disabled' -and $enterpriseProfiles.Count -gt 0) {
             Add-Dot1xFinding $findings 'EAPHOST-DISABLED' 'Warning' 'High' 'Services' `
                 'EapHost is disabled while an 802.1X profile is present.' @("Status=$status; start mode=$start") `
-                @('Ask the endpoint administrator to review the effective EapHost service policy.') `
+                @('Check why the effective EapHost service start mode is Disabled.') `
                 @('A stopped demand-start EapHost service alone is normal and is not diagnosed as a fault.')
         }
     }
@@ -291,7 +330,7 @@ function Get-Dot1xDiagnosis {
         if ($null -ne $validation -and $validation -eq $false) {
             Add-Dot1xFinding $findings 'PROFILE-SERVER-VALIDATION-DISABLED' 'Warning' 'High' 'Profile' `
                 "$label explicitly disables server certificate validation." @('The profile contains an explicit disabled validation setting.') `
-                @('Ask the profile policy owner to configure approved server names and trust anchors. Do not disable validation to troubleshoot.') `
+                @('Configure the intended server names and trust anchors in the deployed profile, with server validation enabled.') `
                 @('This is a security configuration concern, not proof of the observed connection failure.')
         }
         $eapTypes = @(Get-Dot1xValue $p 'EapTypes' @())
@@ -381,8 +420,9 @@ function Get-Dot1xDiagnosis {
                 Add-Dot1xFinding $findings 'AUTH-HISTORICAL-FAILURE' 'Warning' 'High' 'Authentication history' `
                     $summary `
                     @("Provider=$provider; event=$id; record=$(Get-Dot1xValue $e 'RecordId'); UTC=$(Get-Dot1xValue $e 'TimeCreatedUtc'); interface=$(Get-Dot1xValue $e 'InterfaceGuid')", ('Fields: ' + ((Get-Dot1xValue $e 'Fields' @{}) | ConvertTo-Json -Compress -Depth 5))) `
-                    @('Fix the named trust, server-name, credential, or client-certificate error, then reconnect.') `
-                    @()
+                    @('Confirm that this timestamp and interface match the reported attempt. Use the event details and matching RADIUS/NPS logs to choose the next check.') `
+                    @('A later successful attempt can supersede this failure. Numeric code matches are reference labels, not a confirmed cause.')
+                $findings[$findings.Count - 1] | Add-Member -NotePropertyName CodeDetails -NotePropertyValue @(Get-Dot1xEventCodeDetails $e)
             }
         }
     }
@@ -432,22 +472,31 @@ function Get-Dot1xDiagnosis {
         })
         $guid = ConvertTo-Dot1xGuid (Get-Dot1xValue $interface 'InterfaceGuid')
         $matchingHistory = @($authEvents | Where-Object { $guid -and (ConvertTo-Dot1xGuid (Get-Dot1xValue $_.Event 'InterfaceGuid')) -eq $guid } | Sort-Object { Get-Dot1xValue $_.Event 'TimeCreatedUtc' } -Descending)
-        $authContext = 'Current 802.1X authorization is unknown.'
+        $authContext = 'No matching authentication outcome was observed.'
+        $history = $null
         if ($matchingHistory.Count -gt 0) {
             $last = $matchingHistory[0]
-            $authContext = 'Latest matching authentication outcome: {0}, UTC {1}.' -f $last.Outcome, (Get-Dot1xValue $last.Event 'TimeCreatedUtc')
+            $history = [pscustomobject][ordered]@{
+                Outcome=$last.Outcome; IsHistorical=$true
+                TimeCreatedUtc=(Get-Dot1xValue $last.Event 'TimeCreatedUtc')
+                InterfaceGuid=(Get-Dot1xValue $last.Event 'InterfaceGuid')
+                ProfileName=(Get-Dot1xValue (Get-Dot1xValue $last.Event 'Fields') 'ProfileName')
+                ProviderName=(Get-Dot1xValue $last.Event 'ProviderName')
+                EventId=(Get-Dot1xValue $last.Event 'Id'); RecordId=(Get-Dot1xValue $last.Event 'RecordId')
+            }
+            $authContext = 'Latest matching historical authentication outcome: {0}, UTC {1}.' -f $history.Outcome, $history.TimeCreatedUtc
         }
         if ($usable.Count -eq 0) {
             Add-Dot1xFinding $findings 'IP-NO-USABLE-ADDRESS' 'Warning' 'High' 'IP configuration' `
                 "$alias is up, but its collected addresses contain no usable non-link-local IPv4 or IPv6 address." `
                 @("InterfaceIndex=$index", $authContext) `
                 @('Review DHCP, static addressing, intended VLAN, and any IPv6-only design. If authentication succeeded for this attempt, investigate post-authentication addressing separately.') `
-                @('Link state and IP configuration do not prove 802.1X authorization. Link-local-only operation can be intentional. No DHCP renewal, packet transmission, or network change was performed.')
+                @('Link-local-only operation can be intentional. No addressing or connectivity test was performed.') -AuthenticationContext $history
         } elseif (@(Get-Dot1xValue $ip 'DnsServers' @()).Count -eq 0) {
             Add-Dot1xFinding $findings 'DNS-NO-SERVERS' 'Warning' 'High' 'DNS configuration' `
                 "$alias has a usable address but no collected DNS server configuration." @("InterfaceIndex=$index", $authContext) `
                 @('Review the intended DNS configuration and DHCP options after confirming the authentication stage.') `
-                @('This is configuration evidence, not a DNS resolution test. Cached names, alternate resolvers, and local-only designs are not assessed.')
+                @('This is configuration evidence, not a DNS resolution test. Cached names, alternate resolvers, and local-only designs are not assessed.') -AuthenticationContext $history
         }
     }
     return $findings.ToArray()
@@ -1391,6 +1440,7 @@ function Format-Dot1xReport {
     $savedDirectory = [string](Get-Dot1xValue $Report 'OutputDirectory')
     if ($savedDirectory) { $lines.Add('Saved reports: ' + $savedDirectory) }
     $lines.Add('No remediation, network probes, or authentication attempts were performed.')
+    $lines.Add('This snapshot does not test current authentication or establish RADIUS/NPS decisions.')
     $lines.Add('')
     foreach ($finding in @(Get-Dot1xValue $Report 'Findings' @())) {
         $lines.Add(('[{0}; confidence={1}] {2}: {3}' -f $finding.Severity,$finding.Confidence,$finding.Id,$finding.Summary))
