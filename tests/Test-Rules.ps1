@@ -433,5 +433,53 @@ Test-Case 'observed requested profile is not reported missing' {
     $e=New-TestEvidence;$e.Collection|Add-Member NoteProperty ProfileName 'fixture-profile'
     Assert-NoFinding (Get-TestFindings $e) 'PROFILE-NOT-OBSERVED'
 }
+Test-Case 'wired failure HRESULT names an untrusted root' {
+    $e = New-TestEvidence
+    $ev = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514
+    $ev.Fields = [pscustomobject]@{ ReasonCode = '0x50005'; ErrorCode = '0x800b0109' }
+    $e.Events = @($ev)
+    $f = @(Get-TestFindings $e | Where-Object { $_.Id -eq 'AUTH-HISTORICAL-FAILURE' })
+    Assert-Equal $f.Count 1 'Expected one historical failure finding.'
+    Assert-True ($f[0].Summary -match 'CERT_E_UNTRUSTEDROOT') 'Untrusted-root HRESULT was not named.'
+    Assert-True ($f[0].Summary -match 'ONEX_EAP_FAILURE_RECEIVED') 'ONEX EAP failure reason was not named.'
+    Assert-True ($f[0].Summary -notmatch '(?i)RADIUS policy') 'Summary claimed a RADIUS policy verdict.'
+}
+Test-Case 'revocation-offline HRESULT is named without claiming current revocation' {
+    $e = New-TestEvidence
+    $ev = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514
+    $ev.Fields = [pscustomobject]@{ ReasonCode = '0x50005'; ErrorCode = '0x80092013' }
+    $e.Events = @($ev)
+    $summary = @((Get-TestFindings $e | Where-Object { $_.Id -eq 'AUTH-HISTORICAL-FAILURE' }).Summary) -join ' '
+    Assert-True ($summary -match 'CRYPT_E_REVOCATION_OFFLINE') 'Revocation-offline HRESULT was not named.'
+    Assert-True ($summary -match '(?i)timed out|unreachable') 'Revocation-offline meaning was omitted.'
+}
+Test-Case 'unknown HRESULT stays unmapped' {
+    $e = New-TestEvidence
+    $ev = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514
+    $ev.Fields = [pscustomobject]@{ ErrorCode = '0xDEADBEEF' }
+    $e.Events = @($ev)
+    $summary = @((Get-TestFindings $e | Where-Object { $_.Id -eq 'AUTH-HISTORICAL-FAILURE' }).Summary) -join ' '
+    Assert-True ($summary -match '0xDEADBEEF') 'Unknown HRESULT was dropped.'
+    Assert-True ($summary -match 'unmapped') 'Unknown HRESULT was treated as a named diagnosis.'
+    Assert-True ($summary -notmatch 'CERT_E_|CRYPT_E_|SEC_E_') 'Unknown HRESULT was mapped to a named constant.'
+}
+Test-Case 'high-bit HRESULT literals still match CERT_E_UNTRUSTEDROOT' {
+    Assert-True ((Get-Dot1xHresultLabel ([Convert]::ToUInt32('800B0109',16))) -match 'CERT_E_UNTRUSTEDROOT') '0x800B0109 did not decode.'
+    Assert-True ((Get-Dot1xHresultLabel ([Convert]::ToUInt32('80092013',16))) -match 'CRYPT_E_REVOCATION_OFFLINE') '0x80092013 did not decode.'
+}
+Test-Case 'wired name-mismatch and credential failure codes are named' {
+    $e = New-TestEvidence
+    $name = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514
+    $name.Fields = [pscustomobject]@{ ErrorCode = '0x800b0114' }
+    $cred = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514 -MinutesAgo 20
+    $cred.Fields = [pscustomobject]@{ ErrorCode = '0x2b3' }
+    $nocert = New-TestEvent -Provider 'Microsoft-Windows-Wired-AutoConfig' -Id 15514 -MinutesAgo 10
+    $nocert.Fields = [pscustomobject]@{ ErrorCode = '0x80420014' }
+    $e.Events = @($name,$cred,$nocert)
+    $text = @((Get-TestFindings $e | Where-Object { $_.Id -eq 'AUTH-HISTORICAL-FAILURE' }).Summary) -join ' | '
+    Assert-True ($text -match 'CERT_E_INVALID_NAME') 'Server-name HRESULT was not named.'
+    Assert-True ($text -match 'ERROR_AUTH_INTERNAL') 'RAS credential error 691 was not named.'
+    Assert-True ($text -match '80420014') 'Missing-client-cert EAPHost code was not named.'
+}
 
 Complete-Tests

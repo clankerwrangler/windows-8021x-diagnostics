@@ -13,9 +13,13 @@ Read a bounded synthetic evidence JSON file instead of collecting host data.
 Save evidence.json, report.json, and report.txt in a unique private run folder
 under this reusable destination. Missing directories are created; existing files
 and directory ACLs are not changed. The actual run folder is included in text
-and PassThru output. If omitted, write only to the pipeline.
+and PassThru output. A live run with no destination saves under Desktop\Dot1x-Report.
+Offline -EvidencePath without a destination still prints to the pipeline only.
 .PARAMETER IncludeEventMessages
-Include up to 2048 characters of each event message. Messages can contain identities.
+Include up to 2048 characters of each event message. Live collection includes
+messages by default. Messages can contain identities.
+.PARAMETER OmitEventMessages
+Skip event messages on a live run. Use this when identities must stay out of the report.
 .PARAMETER InterfaceAlias
 Limit interface-related collection and findings to this exact adapter alias.
 .PARAMETER ProfileName
@@ -28,12 +32,13 @@ param(
     [string]$InterfaceAlias,
     [string]$ProfileName,
     [ValidateRange(1,168)][int]$LookbackHours = 24,
-    [ValidateRange(1,500)][int]$MaxEventsPerLog = 100,
+    [ValidateRange(1,500)][int]$MaxEventsPerLog = 250,
     [ValidateRange(2,120)][int]$ProbeTimeoutSeconds = 20,
     [ValidateRange(10,600)][int]$OverallTimeoutSeconds = 180,
     [ValidateRange(1,128)][int]$MaxProfiles = 32,
     [ValidateRange(1,500)][int]$MaxCertificatesPerStore = 100,
     [switch]$IncludeEventMessages,
+    [switch]$OmitEventMessages,
     [switch]$PassThru,
     [Parameter(DontShow=$true)][string]$WorkerName,
     [Parameter(DontShow=$true)][string]$WorkerContext
@@ -57,6 +62,100 @@ function ConvertTo-Dot1xGuid {
     $g = [guid]::Empty
     if ([guid]::TryParse([string]$Value, [ref]$g)) { return $g.ToString('D') }
     return ''
+}
+
+function ConvertTo-Dot1xUInt32 {
+    param($Value)
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    try {
+        if ($text -match '^0x[0-9A-Fa-f]{1,8}$') {
+            return [Convert]::ToUInt32($text.Substring(2), 16)
+        }
+        $unsigned = [uint32]0
+        if ([uint32]::TryParse($text, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$unsigned)) {
+            return $unsigned
+        }
+        $signed = 0
+        if ([int]::TryParse($text, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$signed)) {
+            return [uint32]$signed
+        }
+    } catch { }
+    return $null
+}
+
+function Get-Dot1xOnexReasonLabel {
+    param([uint32]$Code)
+    switch (('{0:X8}' -f $Code)) {
+        '00050001' { return 'ONEX_UNABLE_TO_IDENTIFY_USER: no usable credential set was identified' }
+        '00050003' { return 'ONEX_UI_DISABLED: required user input could not be obtained' }
+        '00050004' { return 'ONEX_UI_FAILURE: required user input failed' }
+        '00050005' { return 'ONEX_EAP_FAILURE_RECEIVED: the EAP module returned a failure' }
+        '00050006' { return 'ONEX_AUTHENTICATOR_NO_LONGER_PRESENT: the authenticator disappeared' }
+        '00050007' { return 'ONEX_NO_RESPONSE_TO_IDENTITY: no response to the identity response' }
+        '00050008' { return 'ONEX_PROFILE_VERSION_NOT_SUPPORTED: profile version is unsupported' }
+        '0005000A' { return 'ONEX_PROFILE_DISALLOWED_EAP_TYPE: the EAP type is not allowed' }
+        '0005000B' { return 'ONEX_PROFILE_INVALID_EAP_TYPE_OR_FLAG: EAP type or flags are invalid' }
+        '0005000F' { return 'ONEX_PROFILE_INVALID_AUTH_MODE: authentication mode is invalid' }
+        '00050010' { return 'ONEX_PROFILE_INVALID_EAP_CONNECTION_PROPERTIES: EAP connection properties are invalid' }
+        '00050014' { return 'ONEX_UI_NOT_PERMITTED: user input was not permitted' }
+        default { return $null }
+    }
+}
+
+function Get-Dot1xHresultLabel {
+    param([uint32]$Code)
+    # PowerShell 5.1 sign-extends 0x80000000+ hex literals to Int32, so match on hex text.
+    switch (('{0:X8}' -f $Code)) {
+        '000002B3' { return 'ERROR_AUTH_INTERNAL: the user name or password was not accepted' }
+        '800B0101' { return 'CERT_E_EXPIRED: a certificate in the chain is expired' }
+        '800B0109' { return 'CERT_E_UNTRUSTEDROOT: the chain ended in an untrusted root' }
+        '800B010A' { return 'CERT_E_CHAINING: a chain could not be built to a trusted root' }
+        '800B010C' { return 'CERT_E_REVOKED: a certificate in the chain is revoked' }
+        '800B010E' { return 'CERT_E_REVOCATION_FAILURE: revocation checking failed' }
+        '800B010F' { return 'CERT_E_CN_NO_MATCH: the certificate name did not match the expected name' }
+        '800B0110' { return 'CERT_E_WRONG_USAGE: the certificate is not valid for this use' }
+        '800B0114' { return 'CERT_E_INVALID_NAME: the certificate name did not match the expected server name' }
+        '80092012' { return 'CRYPT_E_NO_REVOCATION_CHECK: no revocation check was performed' }
+        '80092013' { return 'CRYPT_E_REVOCATION_OFFLINE: revocation check timed out or the responder was unreachable' }
+        '8009030C' { return 'SEC_E_LOGON_DENIED: the logon was denied' }
+        '8009030E' { return 'SEC_E_NO_CREDENTIALS: no credentials were available' }
+        '80090317' { return 'SEC_E_UNKNOWN_CREDENTIALS: the credentials were not recognized' }
+        '80090325' { return 'SEC_E_CERT_UNKNOWN: the peer certificate was not recognized' }
+        '80090326' { return 'SEC_E_ILLEGAL_MESSAGE: TLS received an illegal message' }
+        '80090328' { return 'SEC_E_CERT_EXPIRED: the peer certificate is expired' }
+        '80090331' { return 'SEC_E_ALGORITHM_MISMATCH: TLS algorithm mismatch' }
+        '80090016' { return 'NTE_BAD_KEYSET: the private key was not available' }
+        '80420014' { return 'EAPHost 0x80420014: no certificate could be found for this EAP method' }
+        default { return $null }
+    }
+}
+
+function Get-Dot1xAuthFailureSummary {
+    param($Event, [string]$Provider, $Id)
+    $fields = Get-Dot1xValue $Event 'Fields' @{}
+    $parts = New-Object 'System.Collections.Generic.List[string]'
+    $parts.Add("$Provider event $Id reports a historical 802.1X failure.")
+    $reasonRaw = Get-Dot1xValue $fields 'ReasonCode'
+    $reason = ConvertTo-Dot1xUInt32 $reasonRaw
+    if ($null -ne $reason) {
+        $label = Get-Dot1xOnexReasonLabel $reason
+        $hex = '0x{0:X8}' -f $reason
+        if ($label) { $parts.Add("ONEX $hex $label.") }
+        else { $parts.Add("ONEX/reason $hex is retained; this value is not in the documented decoder table.") }
+    } elseif ($reasonRaw) {
+        $parts.Add("ReasonCode=$reasonRaw")
+    }
+    foreach ($name in @('ErrorCode','ResultCode','EapErrorCode')) {
+        $raw = Get-Dot1xValue $fields $name
+        $code = ConvertTo-Dot1xUInt32 $raw
+        if ($null -eq $code) { continue }
+        $label = Get-Dot1xHresultLabel $code
+        $hex = '0x{0:X8}' -f $code
+        if ($label) { $parts.Add("$name $hex $label.") }
+        else { $parts.Add("$name $hex is retained as an unmapped HRESULT.") }
+    }
+    return ($parts -join ' ')
 }
 
 function Add-Dot1xFinding {
@@ -279,11 +378,12 @@ function Get-Dot1xDiagnosis {
         if ($null -ne $outcome) {
             $authEvents.Add([pscustomobject]@{ Event=$e; Outcome=$outcome })
             if ($outcome -eq 'Failure') {
+                $summary = Get-Dot1xAuthFailureSummary -Event $e -Provider $provider -Id $id
                 Add-Dot1xFinding $findings 'AUTH-HISTORICAL-FAILURE' 'Warning' 'High' 'Authentication history' `
-                    'An AutoConfig event reports a historical 802.1X failure.' `
+                    $summary `
                     @("Provider=$provider; event=$id; record=$(Get-Dot1xValue $e 'RecordId'); UTC=$(Get-Dot1xValue $e 'TimeCreatedUtc'); interface=$(Get-Dot1xValue $e 'InterfaceGuid')", ('Fields: ' + ((Get-Dot1xValue $e 'Fields' @{}) | ConvertTo-Json -Compress -Depth 5))) `
-                    @('Correlate the timestamp, interface, profile, and provider-specific reason code with an authorized RADIUS/NPS and switch/AP log review.') `
-                    @('History does not prove a current failure. Endpoint events cannot establish the RADIUS policy, shared secret, switch VLAN, AP configuration, or upstream reachability as the cause.')
+                    @('Use the decoded ONEX reason and HRESULT as client-side TLS/EAP evidence. Correlate the timestamp, interface, and profile with authorized RADIUS/NPS and switch/AP logs.') `
+                    @('History does not prove a current failure. Named constants are endpoint codes, not a RADIUS policy, shared secret, VLAN, or reachability verdict. Unmapped codes stay unmapped.')
             }
         }
     }
@@ -1217,7 +1317,7 @@ function Get-Dot1xEvidence {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$ScriptPath,
           [string]$InterfaceAlias, [string]$ProfileName,
-          [int]$LookbackHours=24, [int]$MaxEventsPerLog=100, [int]$ProbeTimeoutSeconds=20,
+          [int]$LookbackHours=24, [int]$MaxEventsPerLog=250, [int]$ProbeTimeoutSeconds=20,
           [int]$OverallTimeoutSeconds=180, [int]$MaxProfiles=32,
           [int]$MaxCertificatesPerStore=100, [switch]$IncludeEventMessages)
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'Live collection requires Windows. Use -EvidencePath or the offline rules function elsewhere.' }
@@ -1357,6 +1457,13 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $evidence = [IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json -ErrorAction Stop
                 if ((Get-Dot1xValue $evidence 'SchemaVersion') -ne 1) { throw 'Unsupported evidence schema. Expected SchemaVersion=1.' }
             } else {
+                if ($OmitEventMessages) { $IncludeEventMessages = $false }
+                elseif (-not $PSBoundParameters.ContainsKey('IncludeEventMessages')) { $IncludeEventMessages = $true }
+                if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+                    $desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)
+                    if ([string]::IsNullOrWhiteSpace($desktop)) { $desktop = Join-Path $env:USERPROFILE 'Desktop' }
+                    $OutputDirectory = Join-Path $desktop 'Dot1x-Report'
+                }
                 $evidence = Get-Dot1xEvidence -ScriptPath $PSCommandPath -InterfaceAlias $InterfaceAlias -ProfileName $ProfileName `
                     -LookbackHours $LookbackHours -MaxEventsPerLog $MaxEventsPerLog -ProbeTimeoutSeconds $ProbeTimeoutSeconds `
                     -OverallTimeoutSeconds $OverallTimeoutSeconds -MaxProfiles $MaxProfiles -MaxCertificatesPerStore $MaxCertificatesPerStore -IncludeEventMessages:$IncludeEventMessages

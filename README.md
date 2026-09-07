@@ -13,15 +13,15 @@ Windows can block downloaded files. `Unblock-File .\Get-8021xDiagnostics.ps1` re
 Run the diagnostic:
 
 ```powershell
-.\Get-8021xDiagnostics.ps1 -OutputDirectory .\Dot1x-Report
+.\Get-8021xDiagnostics.ps1
 ```
 
-The destination is created or reused automatically; each run is saved in a separate folder, whose path is shown in the report. Without `-OutputDirectory`, the script prints a text report instead of saving report files.
+A live run saves under `Desktop\Dot1x-Report` (a new folder per run) and includes event messages. Use `-OutputDirectory` to choose another destination, `-InterfaceAlias` to scope one adapter, and `-OmitEventMessages` if identities must stay out of the report.
 
 To inspect one adapter, use its exact interface alias. Replace `Ethernet` with the alias on your endpoint:
 
 ```powershell
-.\Get-8021xDiagnostics.ps1 -InterfaceAlias 'Ethernet' -OutputDirectory .\Dot1x-Ethernet-Report
+.\Get-8021xDiagnostics.ps1 -InterfaceAlias 'Ethernet'
 ```
 
 For all options, including profile filters, event-history limits, and structured output, use the built-in help:
