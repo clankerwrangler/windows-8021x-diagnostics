@@ -12,7 +12,8 @@ Read a bounded synthetic evidence JSON file instead of collecting host data.
 Save evidence.json, report.json, and report.txt in a unique private run folder
 under this reusable destination. Missing directories are created; existing files
 and directory ACLs are not changed. The actual run folder is included in text
-and PassThru output. A live run with no destination saves under Desktop\Dot1x-Report.
+and PassThru output. A live run with no destination saves under Dot1x-Report
+in the current working directory.
 Offline -EvidencePath without a destination still prints to the pipeline only.
 .PARAMETER IncludeEventMessages
 Include up to 2048 characters of each event message. Live collection includes
@@ -2016,9 +2017,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 if ($OmitEventMessages) { $IncludeEventMessages = $false }
                 elseif (-not $PSBoundParameters.ContainsKey('IncludeEventMessages')) { $IncludeEventMessages = $true }
                 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-                    $desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)
-                    if ([string]::IsNullOrWhiteSpace($desktop)) { $desktop = Join-Path $env:USERPROFILE 'Desktop' }
-                    $OutputDirectory = Join-Path $desktop 'Dot1x-Report'
+                    $OutputDirectory = Join-Path -Path (Get-Location).Path -ChildPath 'Dot1x-Report'
                 }
                 $evidence = Get-Dot1xEvidence -ScriptPath $PSCommandPath -InterfaceAlias $InterfaceAlias -ProfileName $ProfileName `
                     -LookbackHours $LookbackHours -MaxEventsPerLog $MaxEventsPerLog -ProbeTimeoutSeconds $ProbeTimeoutSeconds `

@@ -16,7 +16,7 @@ Or run `Get-8021xDiagnostics.cmd`.
 
 If Windows blocked the download: `Unblock-File .\Get-8021xDiagnostics.ps1`
 
-Each live run saves a new folder under `Desktop\Dot1x-Report`. Use `-OutputDirectory` for another destination, `-InterfaceAlias` for one adapter, or `-ProfileName` for one profile.
+Each live run saves a new folder under `.\Dot1x-Report` in the current working directory (the directory you run the command from). Use `-OutputDirectory` for another destination, `-InterfaceAlias` for one adapter, or `-ProfileName` for one profile.
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Get-8021xDiagnostics.ps1 -InterfaceAlias 'Ethernet'
