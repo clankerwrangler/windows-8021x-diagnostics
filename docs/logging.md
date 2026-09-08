@@ -1,6 +1,6 @@
 # Client logging preparation
 
-Use the [README workflow](../README.md#prepare-client-logging-then-restore) before reproducing an authentication failure. `Set-8021xLogging.ps1` runs elevated in Windows PowerShell 5.1. It changes logging settings only; it does not change authentication, TLS, certificate trust, profiles, or services.
+Use the [README workflow](../README.md#collect-client-evidence) before reproducing an authentication failure. `Set-8021xLogging.ps1` runs elevated in Windows PowerShell 5.1. It changes logging settings only; it does not change authentication, TLS, certificate trust, profiles, or services.
 
 ## Included channels
 
