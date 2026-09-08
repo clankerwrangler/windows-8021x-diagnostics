@@ -328,7 +328,8 @@ namespace Dot1xLoggingV2 {
             if(directories.Count==0) throw new ObjectDisposedException("DirectoryLease");
             if(String.IsNullOrEmpty(fileName) || fileName=="." || fileName==".." || fileName.IndexOfAny(System.IO.Path.GetInvalidFileNameChars())>=0) throw new IOException("Trace file must be one local filename.");
             string filePath=System.IO.Path.Combine(Path,fileName);
-            using(SafeFileHandle handle=CreateFileW(filePath,0x20080,finalized ? 1U : 3U,IntPtr.Zero,3,0x00200000,IntPtr.Zero)) {
+            // Read-data access makes share checks exclude a competing writer after stop.
+            using(SafeFileHandle handle=CreateFileW(filePath,0x80000000,finalized ? 1U : 3U,IntPtr.Zero,3,0x00200000,IntPtr.Zero)) {
                 if(handle.IsInvalid) {
                     int error=Marshal.GetLastWin32Error();
                     if(allowMissing && error==2) return false;

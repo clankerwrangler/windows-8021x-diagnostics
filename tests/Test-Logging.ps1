@@ -611,6 +611,10 @@ try {
             $acl = Get-Acl -LiteralPath $etl
             $acl.SetAccessRuleProtection($true,$true)
             Set-Acl -LiteralPath $etl -AclObject $acl
+            # Reload the persisted explicit ACEs; PurgeAccessRules skips inherited ACEs.
+            $acl = Get-Acl -LiteralPath $etl
+            $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+            Assert-True ($acl.AreAccessRulesProtected -and @($rules | Where-Object { $_.IsInherited }).Count -eq 0) 'Explicit ACL fixture retained inherited ACEs.'
             Assert-True $lease.ValidateTraceFile('EapHost.etl',$false,$true) 'Equivalent explicit private ACL was rejected.'
             $foreign = New-Object Security.Principal.SecurityIdentifier('S-1-1-0')
             $rule = New-Object Security.AccessControl.FileSystemAccessRule($foreign,[Security.AccessControl.FileSystemRights]::Read,[Security.AccessControl.AccessControlType]::Allow)
@@ -619,6 +623,9 @@ try {
             $acl.RemoveAccessRuleSpecific($rule)
             $acl.PurgeAccessRules((New-Object Security.Principal.SecurityIdentifier('S-1-5-18')))
             Set-Acl -LiteralPath $etl -AclObject $acl
+            $savedAcl = Get-Acl -LiteralPath $etl
+            $savedRules = @($savedAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+            Assert-True ($savedAcl.AreAccessRulesProtected -and @($savedRules | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-18' }).Count -eq 0) ('Incomplete ACL fixture still grants SYSTEM: '+$savedAcl.Sddl)
             Assert-Throws { $lease.ValidateTraceFile('EapHost.etl',$true) } 'ACL is incomplete'
             $acl.SetSecurityDescriptorSddlForm($original); Set-Acl -LiteralPath $etl -AclObject $acl
             Assert-True $lease.ValidateTraceFile('EapHost.etl',$false,$true) 'Restored inherited ACL remained invalid.'

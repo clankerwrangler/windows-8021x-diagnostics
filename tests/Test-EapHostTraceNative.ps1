@@ -54,16 +54,19 @@ function New-NativeTraceFixture {
 }
 function Invoke-NativeFixtureEnsure {
     param([guid]$Provider,$Item)
-    $ensure.Invoke($null,[object[]]@($Provider,$Item.Id,$Item.Name,$Item.Path))
+    # Reflection does not apply PowerShell's normal PSObject argument conversion.
+    $arguments=[object[]]@(([guid]$Provider).PSObject.BaseObject,([guid]$Item.Id).PSObject.BaseObject,([string]$Item.Name).PSObject.BaseObject,([string]$Item.Path).PSObject.BaseObject)
+    $ensure.Invoke($null,$arguments)
 }
 function Assert-NativeForeignGuard {
     param([guid]$Provider)
     $message=''
-    try { $guard.Invoke($null,[object[]]@($Provider,$null)) }
+    try { $guard.Invoke($null,[object[]]@(([guid]$Provider).PSObject.BaseObject,$null)) }
     catch { $message=$_.Exception.ToString() }
     Assert-NativeTrace ($message -match 'already enabled by another session') 'Provider metadata did not identify the foreign enabled session.'
 }
 $clean=$true
+$integrationDirectory=$null
 try {
     Write-Output ('RECEIPT helper_sha256='+(Get-FileHash -LiteralPath $HelperPath -Algorithm SHA256).Hash.ToLowerInvariant()+' ps='+$PSVersionTable.PSVersion.ToString())
     # A registered provider proves re-query and LoggerId-to-handle matching.
@@ -105,7 +108,8 @@ try {
     # Unexpected settings remain recoverable when GUID, name, and path are owned.
     $changed=New-NativeTraceFixture
     $newProperties=[Dot1xLoggingV2.EapHostTrace].GetMethod('NewProperties',$flags)
-    $properties=$newProperties.Invoke($null,[object[]]@($changed.Id,$changed.Path,$true))
+    $arguments=[object[]]@(([guid]$changed.Id).PSObject.BaseObject,([string]$changed.Path).PSObject.BaseObject,([bool]$true).PSObject.BaseObject)
+    $properties=$newProperties.Invoke($null,$arguments)
     try {
         $type=[Dot1xLoggingV2.EapHostTrace].Assembly.GetType('Dot1xLoggingV2.TraceProperties')
         $modeOffset=[Runtime.InteropServices.Marshal]::OffsetOf($type,'LogFileMode').ToInt32()
@@ -130,6 +134,77 @@ try {
     Assert-NativeTrace ($actual.Lease.ValidateTraceFile('EapHost.etl',$false,$true)) 'The finalized EapHost ETL is missing or unsafe.'
     Assert-NativeTrace ((New-Object IO.FileInfo($actual.Path)).Length -gt 0) 'The finalized EapHost ETL is empty.'
     Write-Output 'PASS fixed EapHost provider ensure, repeat, query, stop, and finalized ETL'
+
+    # Keep the state store, directory lease, and ETW path real across helper calls.
+    # Only channel/registry adapters use synthetic settings.
+    $integrationDirectory=[IO.Path]::Combine($root.Path,'orchestration-state')
+    $integrationMachine='native-fixture-machine'
+    $script:integrationConfiguration=@{
+        'Microsoft-Windows-Wired-AutoConfig/Operational'=[pscustomobject]@{Enabled=$false;MaximumSize=1048576L}
+        'Microsoft-Windows-WLAN-AutoConfig/Operational'=[pscustomobject]@{Enabled=$true;MaximumSize=209715200L}
+    }
+    $script:integrationSchannel=[pscustomobject]@{Present=$true;Value=3L}
+    function Invoke-LoggingNative {
+        param([string[]]$Arguments)
+        if ($Arguments[0] -eq 'el') { return [pscustomobject]@{ExitCode=0;Text=($script:integrationConfiguration.Keys -join "`r`n")} }
+        $name=$Arguments[1]
+        if (-not $script:integrationConfiguration.ContainsKey($name)) { throw 'Unexpected integration channel.' }
+        $setting=$script:integrationConfiguration[$name]
+        if ($Arguments[0] -eq 'sl') {
+            $setting.Enabled=[bool]::Parse($Arguments[2].Substring(3))
+            $setting.MaximumSize=[long]::Parse($Arguments[3].Substring(4))
+            return [pscustomobject]@{ExitCode=0;Text=''}
+        }
+        if ($Arguments[0] -ne 'gl') { throw 'Unexpected integration native action.' }
+        $text='<channel xmlns="http://schemas.microsoft.com/win/2004/08/events" name="'+$name+'" enabled="'+$setting.Enabled.ToString().ToLowerInvariant()+'"><logging><maxSize>'+$setting.MaximumSize+'</maxSize></logging></channel>'
+        return [pscustomobject]@{ExitCode=0;Text=$text}
+    }
+    function Get-LoggingSchannel { return $script:integrationSchannel }
+    function Set-LoggingSchannel {
+        param($Setting)
+        $script:integrationSchannel=[pscustomobject]@{Present=$Setting.Present;Value=$Setting.Value}
+    }
+    $legacy=New-LoggingState $integrationMachine $caller $true
+    Assert-NativeTrace ($legacy.Version -eq 1) 'The persisted integration baseline is not v1.'
+    $store=New-Object Dot1xLoggingV2.Store($integrationDirectory,$caller,$true)
+    try { $store.SaveNew(($legacy|ConvertTo-Json -Depth 6 -Compress)) } finally { $store.Dispose() }
+    $baselinePath=[IO.Path]::Combine($integrationDirectory,'state.json')
+    $traceRecordPath=[IO.Path]::Combine($integrationDirectory,'eaphost-trace.json')
+    $baselineBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($baselinePath))
+    Assert-NativeTrace (-not [IO.File]::Exists($traceRecordPath)) 'A trace record preceded the upgrade Enable.'
+    $outputParent=[IO.Path]::Combine($root.Path,'orchestration-report')
+    $store=New-Object Dot1xLoggingV2.Store($integrationDirectory,$caller,$false)
+    try { Invoke-LoggingSession $store $integrationMachine $caller $false $true $outputParent } finally { $store.Dispose() }
+    Assert-NativeTrace ($baselineBytes -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($baselinePath))) 'Enable rewrote the original v1 baseline.'
+    $traceBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($traceRecordPath))
+    $store=New-Object Dot1xLoggingV2.Store($integrationDirectory,$caller,$false)
+    try { $traceState=ConvertFrom-Json -InputObject $store.ReadTrace() } finally { $store.Dispose() }
+    Assert-LoggingTraceState $traceState $integrationMachine $caller
+    $first=Invoke-LoggingTraceNative -Action Query -State $traceState
+    Assert-NativeTrace ($null -ne $first) 'Default Enable did not start the saved trace.'
+    Assert-NativeTrace ([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($traceState.TracePath)) -ceq $outputParent) 'The integration trace ignored its output parent.'
+    foreach ($setting in $script:integrationConfiguration.Values) { Assert-NativeTrace ($setting.Enabled -and $setting.MaximumSize -ge 104857600L) 'Enable did not prepare the mock channel.' }
+    Assert-NativeTrace ($script:integrationConfiguration['Microsoft-Windows-WLAN-AutoConfig/Operational'].MaximumSize -eq 209715200L) 'Enable shrank the larger mock channel.'
+    Assert-NativeTrace ($script:integrationSchannel.Value -eq 7) 'Enable did not apply the mock Schannel value.'
+    $store=New-Object Dot1xLoggingV2.Store($integrationDirectory,$caller,$false)
+    try { Invoke-LoggingSession $store $integrationMachine $caller $false $true $outputParent } finally { $store.Dispose() }
+    Assert-NativeTrace ($baselineBytes -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($baselinePath))) 'Repeated Enable rewrote the v1 baseline.'
+    Assert-NativeTrace ($traceBytes -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($traceRecordPath))) 'Repeated Enable rewrote the trace intent.'
+    $again=Invoke-LoggingTraceNative -Action Query -State $traceState
+    Assert-NativeTrace ($null -ne $again -and $first.Handle -eq $again.Handle) 'Repeated helper Enable replaced the native trace.'
+    $store=New-Object Dot1xLoggingV2.Store($integrationDirectory,$caller,$false)
+    try { Invoke-LoggingSession $store $integrationMachine $caller $true $false '' } finally { $store.Dispose() }
+    Assert-NativeTrace ($null -eq (Invoke-LoggingTraceNative -Action Query -State $traceState)) 'Helper Restore left the native trace active.'
+    Assert-NativeTrace (-not [IO.File]::Exists($baselinePath) -and -not [IO.File]::Exists($traceRecordPath)) 'Helper Restore retained completed recovery records.'
+    foreach ($channel in $legacy.Channels) {
+        $restored=$script:integrationConfiguration[$channel.Name]
+        Assert-NativeTrace ($restored.Enabled -eq $channel.Enabled -and $restored.MaximumSize -eq $channel.MaximumSize) 'Restore did not recover the original mock channel settings.'
+    }
+    Assert-NativeTrace ($script:integrationSchannel.Present -eq $legacy.Schannel.Present -and $script:integrationSchannel.Value -eq $legacy.Schannel.Value) 'Restore did not recover the original mock Schannel value.'
+    $lease=New-Object Dot1xLoggingV2.DirectoryLease(([IO.Path]::GetDirectoryName($traceState.TracePath)),$caller,$false,$false)
+    try { Assert-NativeTrace ($lease.ValidateTraceFile('EapHost.etl',$false,$true)) 'Helper Restore did not finalize a safe ETL.' } finally { $lease.Dispose() }
+    Assert-NativeTrace ((New-Object IO.FileInfo($traceState.TracePath)).Length -gt 0) 'The helper integration ETL is empty.'
+    Write-Output 'PASS helper integration: v1 upgrade, durable trace intent, repeat identity, restored mock settings, and finalized ETL'
 } catch {
     Write-Output ('FAIL native lifecycle: '+$_.Exception.ToString())
     $failure=$_.Exception
@@ -139,6 +214,19 @@ try {
     }
     throw
 } finally {
+    if ($null -ne $integrationDirectory) {
+        $recoveryStore=$null
+        try {
+            $recoveryStore=New-Object Dot1xLoggingV2.Store($integrationDirectory,$caller,$false)
+            $json=$recoveryStore.ReadTrace()
+            if ($null -ne $json) {
+                $recoveryState=ConvertFrom-Json -InputObject $json
+                Assert-LoggingTraceState $recoveryState $integrationMachine $caller
+                $null=Invoke-LoggingTraceNative -Action Stop -State $recoveryState
+            }
+        } catch { $clean=$false; Write-Warning ('Owned integration trace cleanup failed: '+$_.Exception.Message) }
+        finally { if ($null -ne $recoveryStore) { $recoveryStore.Dispose() } }
+    }
     foreach ($item in $sessions) {
         try { [Dot1xLoggingV2.EapHostTrace]::Stop($item.Id,$item.Name,$item.Path) }
         catch { $clean=$false; Write-Warning ('Owned fixture trace cleanup failed: '+$_.Exception.Message) }
