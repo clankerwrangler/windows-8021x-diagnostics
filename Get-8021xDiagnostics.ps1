@@ -1463,6 +1463,39 @@ function ConvertTo-Dot1xReportTime {
     return $null
 }
 
+function Format-Dot1xReportLocalTime {
+    param($Value, [TimeZoneInfo]$TimeZone = [TimeZoneInfo]::Local)
+    $time = [DateTimeOffset]::MinValue
+    # The report view's offset-free FirstUtc/LastUtc values are still UTC.
+    $styles = [Globalization.DateTimeStyles]::AllowWhiteSpaces -bor [Globalization.DateTimeStyles]::AssumeUniversal
+    if (-not [DateTimeOffset]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$time)) {
+        return 'time not recorded'
+    }
+    return [TimeZoneInfo]::ConvertTime($time, $TimeZone).ToString('yyyy-MM-dd HH:mm:ss zzz', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Format-Dot1xReportEvidence {
+    param([string]$FindingId, [string]$Value)
+    # Convert generated timestamp references at rendering time; retain the finding.
+    $pattern = ''
+    switch ($FindingId) {
+        'AUTH-HISTORICAL-FAILURE' { $pattern = '^(?<prefix>Provider=[^;]*; event=[^;]*; record=[^;]*; )UTC=(?<time>[^;]*)(?<suffix>; interface=.*)$' }
+        'TLS-EAP-SUPPORTING-HISTORY' { $pattern = '^(?<prefix>.*?, event [^,]*, record [^,]*, )UTC (?<time>.*)$' }
+        'NTLM-CREDENTIAL-GUARD-CONTEXT' { $pattern = '^(?<prefix>Microsoft-Windows-NTLM event [^,]*, )UTC (?<time>.*)$' }
+        { $_ -in @('IP-NO-USABLE-ADDRESS','DNS-NO-SERVERS') } {
+            $pattern = '^(?<prefix>Latest matching historical authentication outcome: [^,]*, )UTC (?<time>.*)(?<suffix>\.)$'
+        }
+        'CERT-CANDIDATES-EXPIRING' { $pattern = '^(?<prefix>[0-9A-Fa-f]{40}: )(?<time>.*)$' }
+    }
+    if ($pattern) {
+        $match = [regex]::Match($Value, $pattern)
+        if ($match.Success) {
+            return $match.Groups['prefix'].Value + 'local time: ' + (Format-Dot1xReportLocalTime $match.Groups['time'].Value) + $match.Groups['suffix'].Value
+        }
+    }
+    return $Value
+}
+
 function Get-Dot1xReportScope {
     param($Evidence)
     $collection = Get-Dot1xValue $Evidence 'Collection'
@@ -1834,9 +1867,10 @@ function New-Dot1xReportView {
         if ($logRows.Count -eq 1) {
             $log = $logRows[0]
             if ((Get-Dot1xValue $log 'Enabled') -eq $false) { $detail = 'Logging is disabled; retained history may be incomplete.' }
-            elseif ((Get-Dot1xValue $log 'QueryStatus') -eq 'UnsupportedProviderChannel') { $detail = 'This provider does not publish to this channel.' }
+            elseif ((Get-Dot1xValue $log 'QueryStatus') -eq 'UnsupportedProviderChannel') { $detail = 'Not applicable on this Windows installation.' }
             elseif ((Get-Dot1xValue $log 'Truncated') -eq $true) { $detail = 'Event limit reached; older matching events may be missing.' }
         }
+        $ordinary = @($limits | Where-Object { $cleanup -notcontains $_ } | Select-Object -Unique)
         if (-not $detail -and $status -ne 'Succeeded') {
             switch ($name) {
                 'Interfaces' { $detail = 'Interface/IP data incomplete; link and addressing findings may be missing.' }
@@ -1847,9 +1881,9 @@ function New-Dot1xReportView {
                 'CertificatesLocalMachine' { $detail = 'Machine certificates were not fully read; candidate absence is unknown.' }
             }
             if ($status -eq 'Skipped') { $detail = 'Not collected; collection ended before this probe ran.' }
+            if ($detail -and $ordinary.Count -gt 0) { $detail += ' ' + ($ordinary -join ' ') }
         }
         if (-not $detail) {
-            $ordinary = @($limits | Where-Object { $cleanup -notcontains $_ } | Select-Object -Unique)
             if ($ordinary.Count -gt 0) { $detail = $ordinary -join ' ' }
             elseif ($status -ne 'Succeeded') { $detail = $status + '; this evidence was not fully collected.' }
         }
@@ -1895,7 +1929,7 @@ function Format-Dot1xReport {
     param([Parameter(Mandatory=$true)]$Report, $Evidence = $null, [switch]$Detailed)
     $lines = New-Object 'System.Collections.Generic.List[string]'
     $lines.Add('Windows 802.1X diagnostics')
-    Add-Dot1xReportLine $lines ('Captured UTC: ' + [string](Get-Dot1xValue $Report 'CapturedAtUtc'))
+    Add-Dot1xReportLine $lines ('Captured (local time): ' + (Format-Dot1xReportLocalTime (Get-Dot1xValue $Report 'CapturedAtUtc')))
     $savedDirectory = [string](Get-Dot1xValue $Report 'OutputDirectory')
     if ($savedDirectory) { $lines.Add('Saved reports: ' + (ConvertTo-Dot1xReportText $savedDirectory)) }
     $lines.Add('')
@@ -1922,21 +1956,21 @@ function Format-Dot1xReport {
         $lines.Add('No issues identified in the collected configuration.')
         $lines.Add('')
     }
-    $lines.Add('Authentication history (UTC)')
+    $lines.Add('Authentication history (local time; UTC offset shown)')
     if ($view.History.Count -eq 0) { $lines.Add('  No matching authentication outcomes in the collected history.') }
     $historyLimit = 10
     if ($Detailed) { $historyLimit = [int]::MaxValue }
     foreach ($group in @($view.History | Select-Object -First $historyLimit)) {
         Add-Dot1xReportLine $lines $group.Target '  '
-        $range = $group.LastUtc
-        if ($group.FirstUtc -ne $group.LastUtc) { $range = $group.FirstUtc + ' to ' + $group.LastUtc }
+        $range = Format-Dot1xReportLocalTime $group.LastUtc
+        if ($group.FirstUtc -ne $group.LastUtc) { $range = (Format-Dot1xReportLocalTime $group.FirstUtc) + ' to ' + $range }
         Add-Dot1xReportLine $lines ('{0} {1} event(s): {2}' -f $group.Count,$group.Outcome.ToLowerInvariant(),$range) '    '
         if ($group.Outcome -eq 'Failure') {
             if ($group.Codes.Count -gt 0) { Add-Dot1xReportLine $lines ($group.Codes -join '; ') '    ' }
             else { $lines.Add('    No structured error code recorded.') }
             if ($group.PossibleMeanings.Count -gt 0) { Add-Dot1xReportLine $lines ('Possible meaning (numeric match): ' + ($group.PossibleMeanings -join '; ')) '    ' }
             if ($group.LaterSuccessUtc) {
-                Add-Dot1xReportLine $lines ('Later same-context success recorded: ' + $group.LaterSuccessUtc + '.') '    '
+                Add-Dot1xReportLine $lines ('Later same-context success recorded: ' + (Format-Dot1xReportLocalTime $group.LaterSuccessUtc) + '.') '    '
             } else {
                 if ($group.ContextKnown) { $lines.Add('    No later same-context success in the collected history.') }
                 else { $lines.Add('    Attempt context incomplete; recovery not assessed.') }
@@ -1957,7 +1991,7 @@ function Format-Dot1xReport {
         $lines.Add(''); $lines.Add('Detailed findings and collection diagnostics')
         foreach ($finding in @(Get-Dot1xValue $Report 'Findings' @())) {
             Add-Dot1xReportLine $lines ('[{0}; confidence={1}] {2}: {3}' -f $finding.Severity,$finding.Confidence,$finding.Id,$finding.Summary)
-            foreach ($item in @($finding.Evidence)) { Add-Dot1xReportLine $lines ('Evidence: ' + $item) '  ' }
+            foreach ($item in @($finding.Evidence)) { Add-Dot1xReportLine $lines ('Evidence: ' + (Format-Dot1xReportEvidence -FindingId $finding.Id -Value $item)) '  ' }
             foreach ($item in @($finding.Remediation)) { Add-Dot1xReportLine $lines ('Next step: ' + $item) '  ' }
             foreach ($item in @($finding.Limitations)) { Add-Dot1xReportLine $lines ('Limitation: ' + $item) '  ' }
             $lines.Add('')

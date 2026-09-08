@@ -22,6 +22,7 @@ $fixture = [pscustomobject]@{
     Profiles = @($profile); CertificateStores = @([pscustomobject]@{ Store = 'LocalMachine'; Status = 'Succeeded'; Truncated = $false })
     Certificates = @(); Probes = @([pscustomobject]@{ Name = 'SyntheticEvents'; Status = 'Failed'; DurationMs = 1; Limitations = @('Synthetic denied collection.') })
 }
+$expectedCaptureLine = 'Captured (local time): ' + ([DateTimeOffset]::Parse($fixture.CapturedAtUtc, [Globalization.CultureInfo]::InvariantCulture)).ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz', [Globalization.CultureInfo]::InvariantCulture)
 [IO.File]::WriteAllText($inputPath, ($fixture | ConvertTo-Json -Depth 20), [Text.Encoding]::UTF8)
 function Invoke-TestCli {
     param([string]$Extra = '', [string]$InputFile = $inputPath)
@@ -85,6 +86,7 @@ try {
         Assert-Equal $r.ExitCode 0 'Completed offline diagnosis did not exit zero.'
         Assert-True ($r.Stdout -match 'Missing evidence / collection issues') 'Compact output lacks the collection-gap section.'
         Assert-True ($r.Stdout -match 'Synthetic denied collection') 'Compact output lost the specific collection gap.'
+        Assert-True $r.Stdout.Contains($expectedCaptureLine) 'Compact CLI capture time is not local with an offset.'
         Assert-True ($r.Stdout -notmatch 'Saved reports:') 'Pipeline-only text claims to have saved a report.'
         Assert-Equal @(Get-ChildItem -LiteralPath $caseRoot -Force).Count $before 'Pipeline-only output wrote files.'
     }
@@ -94,6 +96,7 @@ try {
         Assert-Equal $r.ExitCode 0 'Detailed offline CLI failed.'
         Assert-True ($r.Stdout -match 'COLLECTION-INCOMPLETE') 'Detailed output lost the original finding ID.'
         Assert-True ($r.Stdout -match 'Detailed findings and collection diagnostics') 'Detailed mode did not reach the console.'
+        Assert-True $r.Stdout.Contains($expectedCaptureLine) 'Detailed CLI capture time is not local with an offset.'
         Assert-Equal @(Get-ChildItem -LiteralPath $caseRoot -Force).Count $before 'Detailed pipeline output wrote files.'
     }
     Test-Case 'compact and Detailed selection reaches saved text and leaves JSON complete' {
@@ -106,9 +109,13 @@ try {
             Assert-Equal $saved.Count 1 'CLI did not identify exactly one saved run.'
             $text = [IO.File]::ReadAllText((Join-Path $saved[0].FullName 'report.txt'))
             Assert-Equal $text.TrimEnd() $r.Stdout.TrimEnd() 'Console and saved text used different report styles.'
+            Assert-True $text.Contains($expectedCaptureLine) 'Saved text capture time is not local with an offset.'
             Assert-Equal ($text -match 'Detailed findings and collection diagnostics') ([bool]$extra) 'Saved text ignored Detailed selection.'
             $json = [IO.File]::ReadAllText((Join-Path $saved[0].FullName 'report.json')) | ConvertFrom-Json
             Assert-True (@($json.Findings | Where-Object { $_.Id -eq 'COLLECTION-INCOMPLETE' }).Count -gt 0) 'Compact display removed the full JSON finding.'
+            Assert-Equal $json.CapturedAtUtc $fixture.CapturedAtUtc 'Saved report JSON changed the UTC capture time.'
+            $savedEvidence = [IO.File]::ReadAllText((Join-Path $saved[0].FullName 'evidence.json')) | ConvertFrom-Json
+            Assert-Equal $savedEvidence.CapturedAtUtc $fixture.CapturedAtUtc 'Saved evidence JSON changed the UTC capture time.'
         }
     }
 
@@ -119,6 +126,7 @@ try {
         $returned = @($r.Stdout | ConvertFrom-Json)
         Assert-Equal $returned.Count 1 'PassThru emitted more than one pipeline object.'
         Assert-Equal $returned[0].SchemaVersion 1 'PassThru did not return the report object.'
+        Assert-Equal $returned[0].CapturedAtUtc $fixture.CapturedAtUtc 'PassThru changed the UTC capture time.'
         Assert-True ($null -eq $returned[0].PSObject.Properties['OutputDirectory']) 'Unsaved PassThru report claims a saved path.'
         Assert-Equal @(Get-ChildItem -LiteralPath $caseRoot -Force).Count $before 'Pipeline-only PassThru wrote files.'
     }

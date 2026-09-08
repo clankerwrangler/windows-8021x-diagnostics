@@ -2,7 +2,11 @@
 
 The console and `report.txt` show relevant configuration, observations with possible interpretations and next checks, grouped authentication history, and collection gaps. They do not print successful probe timings or generic collector limitations.
 
+Incomplete interface, service, profile, and certificate summaries include the recorded probe reasons. Cleanup warnings remain separate.
+
 Use `-InterfaceAlias` or `-ProfileName` to select a target. Without either, the configuration view selects active physical interfaces. For WLAN, the current profile is preferred when Windows reported one. An explicitly selected disconnected interface remains visible. Unrelated adapter/profile findings remain in the full JSON and detailed text.
+
+The console and `report.txt` show capture and event times in the rendering machine's local time, with an explicit UTC offset for each instant, including daylight saving time. Detailed timestamp references use the same format. `report.json` and `evidence.json` retain UTC timestamps for correlation and ordering.
 
 ## More detail
 

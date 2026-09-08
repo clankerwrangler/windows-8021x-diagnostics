@@ -16,6 +16,8 @@ Each selected log smaller than 100 MiB gets a 100 MiB maximum. Larger logs stay 
 
 The collector still queries its original five channels and selected System events. It does not ingest the supplemental channels, EVTX files, or live traces. Use Event Viewer to inspect or export supplemental events before restoring settings if you need them. Restoring smaller original log sizes can reduce retained history as Windows enforces those limits.
 
+The collector assesses `System / EapHost` and `EapHost/Operational` separately. A provider/channel mismatch appears as “Not applicable on this Windows installation.” in the compact report; `EapHost/Operational` retains its own collection status.
+
 ## Optional Schannel detail
 
 To include machine-wide Schannel event logging in the saved baseline, start with:

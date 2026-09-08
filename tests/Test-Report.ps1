@@ -71,6 +71,104 @@ function New-ReportCertificate {
     }
 }
 
+function Get-ExpectedReportLocalTime {
+    param([string]$Value)
+    ([DateTimeOffset]::Parse($Value, [Globalization.CultureInfo]::InvariantCulture)).ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+Test-ReportCase 'capture ranges and linked success use machine local time with offsets' {
+    $e=New-ReportFixture
+    $e.Events=@((New-ReportEvent),(New-ReportEvent -Time '2026-09-07T18:10:00Z'),(New-ReportEvent -Id 15505 -Code '' -Time '2026-09-07T18:30:00Z'))
+    $r=New-ReportObject $e
+    $capture=Get-ExpectedReportLocalTime $e.CapturedAtUtc
+    $first=Get-ExpectedReportLocalTime '2026-09-07T18:00:00Z'
+    $last=Get-ExpectedReportLocalTime '2026-09-07T18:10:00Z'
+    $success=Get-ExpectedReportLocalTime '2026-09-07T18:30:00Z'
+    foreach ($detailed in @($false,$true)) {
+        $text=(Format-Dot1xReport -Report $r -Evidence $e -Detailed:$detailed) -replace '\s+', ' '
+        Assert-Report ($text.Contains('Captured (local time): '+$capture)) 'Capture time is not local with an offset.'
+        Assert-Report ($text.Contains('Authentication history (local time; UTC offset shown)')) 'History timezone label missing.'
+        Assert-Report ($text.Contains('2 failure event(s): '+$first+' to '+$last)) 'History range did not convert both UTC endpoints.'
+        Assert-Report ($text.Contains('Later same-context success recorded: '+$success+'.')) 'Linked success is not local with an offset.'
+    }
+}
+Test-ReportCase 'missing and invalid timestamps remain unknown in rendered output' {
+    foreach ($value in @($null,'','invalid','time not recorded')) {
+        Assert-Report ((Format-Dot1xReportLocalTime $value) -eq 'time not recorded') 'Unknown time acquired a rendered timestamp.'
+        $e=New-ReportFixture; $e.CapturedAtUtc=$value; $e.Events=@(New-ReportEvent -Time $value)
+        $text=Format-Dot1xReport -Report (New-ReportObject $e) -Evidence $e
+        Assert-Report ($text.Contains('Captured (local time): time not recorded')) 'Unknown capture time was not explained.'
+        Assert-Report ($text.Contains('1 failure event(s): time not recorded')) 'Unknown event time was not retained.'
+    }
+    $e=New-ReportFixture; $e.PSObject.Properties.Remove('CapturedAtUtc')
+    $text=Format-Dot1xReport -Report ([pscustomobject]@{Findings=@();Probes=@()}) -Evidence $e
+    Assert-Report ($text.Contains('Captured (local time): time not recorded')) 'Absent capture property acquired a time.'
+}
+Test-ReportCase 'local formatting applies the offset at each instant across DST transitions' {
+    # In-memory timezone rules keep this check independent of host timezone settings.
+    $start=[TimeZoneInfo+TransitionTime]::CreateFixedDateRule([datetime]'0001-01-01T02:00:00',3,8)
+    $end=[TimeZoneInfo+TransitionTime]::CreateFixedDateRule([datetime]'0001-01-01T02:00:00',11,1)
+    $rule=[TimeZoneInfo+AdjustmentRule]::CreateAdjustmentRule([datetime]'2026-01-01',[datetime]'2026-12-31',[TimeSpan]::FromHours(1),$start,$end)
+    $zone=[TimeZoneInfo]::CreateCustomTimeZone('ReportTestDST',[TimeSpan]::FromHours(-5),'Report test','Standard','Daylight',[TimeZoneInfo+AdjustmentRule[]]@($rule))
+    $cases=@(
+        @('2026-01-15T12:00:00Z','2026-01-15 07:00:00 -05:00'),
+        @('2026-09-07T18:00:00Z','2026-09-07 14:00:00 -04:00'),
+        @('2026-03-08T06:59:59Z','2026-03-08 01:59:59 -05:00'),
+        @('2026-03-08T07:00:00Z','2026-03-08 03:00:00 -04:00'),
+        @('2026-11-01T05:30:00Z','2026-11-01 01:30:00 -04:00'),
+        @('2026-11-01T06:30:00Z','2026-11-01 01:30:00 -05:00'),
+        @('2026-09-07T19:00:00+02:00','2026-09-07 13:00:00 -04:00'),
+        @('2026-09-07 17:00:00','2026-09-07 13:00:00 -04:00')
+    )
+    foreach ($case in $cases) {
+        Assert-Report ((Format-Dot1xReportLocalTime $case[0] -TimeZone $zone) -ceq $case[1]) ('Wrong per-instant offset for '+$case[0])
+    }
+}
+Test-ReportCase 'history retains UTC sort and recovery keys across the repeated DST hour' {
+    $e=New-ReportFixture; $e.CapturedAtUtc='2026-11-01T07:00:00Z'
+    $e.Events=@((New-ReportEvent -Time '2026-11-01T05:50:00Z'),(New-ReportEvent -Time '2026-11-01T06:05:00Z'),
+        (New-ReportEvent -Profile 'Other' -Time '2026-11-01T06:00:00Z'),(New-ReportEvent -Id 15505 -Code '' -Time '2026-11-01T06:10:00Z'))
+    $r=New-ReportObject $e; $view=New-Dot1xReportView -Report $r -Evidence $e
+    Assert-Report ($view.History.Count -eq 2) 'Linked success was duplicated or an independent context was lost.'
+    Assert-Report ($view.History[0].FirstUtc -eq '2026-11-01 05:50:00' -and $view.History[0].LastUtc -eq '2026-11-01 06:05:00') 'UTC range keys changed.'
+    Assert-Report ($view.History[0].LaterSuccessUtc -eq '2026-11-01 06:10:00') 'UTC recovery key changed.'
+    Assert-Report ($view.History[1].LastUtc -eq '2026-11-01 06:00:00' -and -not $view.History[1].LaterSuccessUtc) 'Ordering or context isolation changed.'
+    $text=(Format-Dot1xReport -Report $r -Evidence $e) -replace '\s+', ' '
+    $range=(Get-ExpectedReportLocalTime '2026-11-01T05:50:00Z')+' to '+(Get-ExpectedReportLocalTime '2026-11-01T06:05:00Z')
+    Assert-Report ($text.Contains($range)) 'DST-spanning range lost an endpoint or offset.'
+}
+Test-ReportCase 'detailed evidence references use local time while structured findings retain UTC' {
+    $e=New-ReportFixture; $e.Profiles[0].EapTypes=@(13)
+    $certificate=New-ReportCertificate; $certificate.NotAfterUtc='2026-09-15T12:00:00Z'; $e.Certificates=@($certificate)
+    $support=New-ReportEvent; $support.ProviderName='Microsoft-Windows-EapHost'; $support.Id=2002
+    $ntlm=New-ReportEvent; $ntlm.ProviderName='Microsoft-Windows-NTLM'; $ntlm.Id=4013
+    $e.Events=@((New-ReportEvent),$support,$ntlm)
+    $e.IpConfiguration[0].DnsServers=@()
+    foreach ($addressPresent in @($true,$false)) {
+        if (-not $addressPresent) { $e.IpConfiguration[0].IPv4Addresses=@() }
+        $r=New-ReportObject $e
+        $beforeE=$e|ConvertTo-Json -Depth 30 -Compress; $beforeR=$r|ConvertTo-Json -Depth 30 -Compress
+        $text=(Format-Dot1xReport -Report $r -Evidence $e -Detailed) -replace '\s+', ' '
+        $local=Get-ExpectedReportLocalTime '2026-09-07T18:00:00Z'
+        Assert-Report ($text.Contains('record=1; local time: '+$local+'; interface=')) 'Authentication reference retained UTC.'
+        Assert-Report ($text.Contains('Microsoft-Windows-EapHost, event 2002, record 1, local time: '+$local)) 'Supporting reference retained UTC.'
+        Assert-Report ($text.Contains('Microsoft-Windows-NTLM event 4013, local time: '+$local)) 'NTLM reference retained UTC.'
+        Assert-Report ($text.Contains('Latest matching historical authentication outcome: Failure, local time: '+$local+'.')) 'IP/DNS context retained UTC.'
+        Assert-Report ($text.Contains($certificate.Thumbprint+': local time: '+(Get-ExpectedReportLocalTime $certificate.NotAfterUtc))) 'Certificate expiry reference retained UTC.'
+        Assert-Report (($e|ConvertTo-Json -Depth 30 -Compress) -ceq $beforeE) 'Detailed formatting changed evidence.'
+        Assert-Report (($r|ConvertTo-Json -Depth 30 -Compress) -ceq $beforeR) 'Detailed formatting changed structured findings.'
+        Assert-Report ($beforeR.Contains('UTC=2026-09-07T18:00:00Z')) 'Structured evidence reference lost UTC.'
+    }
+}
+Test-ReportCase 'detailed time conversion preserves raw fields and unknown reference text' {
+    $raw='Fields: {"UTC":"2026-09-07T18:00:00Z"}'
+    Assert-Report ((Format-Dot1xReportEvidence 'AUTH-HISTORICAL-FAILURE' $raw) -ceq $raw) 'Raw event fields were rewritten.'
+    $future='Future timestamp UTC 2026-09-07T18:00:00Z'
+    Assert-Report ((Format-Dot1xReportEvidence 'FUTURE-RULE' $future) -ceq $future) 'Unknown finding text was rewritten.'
+    $unknown='Provider=Microsoft-Windows-Wired-AutoConfig; event=15514; record=1; UTC=invalid; interface=fixture'
+    Assert-Report ((Format-Dot1xReportEvidence 'AUTH-HISTORICAL-FAILURE' $unknown).Contains('local time: time not recorded; interface=fixture')) 'Invalid detailed time acquired a timestamp.'
+}
+
 Test-ReportCase 'empty evidence does not become a clean report' {
     $e=New-ReportFixture; $e.Interfaces=@(); $e.Profiles=@(); $e.Probes=@()
     $text=Format-Dot1xReport -Report (New-ReportObject $e) -Evidence $e
@@ -250,6 +348,71 @@ Test-ReportCase 'temporary-file cleanup failure remains visible after worker suc
     $e=New-ReportFixture; $e.Probes+=[pscustomobject]@{Name='Wired';Status='Partial';DurationMs=1;CleanupConfirmed=$true;Limitations=@('Private wired transport cleanup is incomplete at C:\fixture\xml. Treat remaining files as sensitive.')}
     $view=New-Dot1xReportView -Report (New-ReportObject $e) -Evidence $e
     Assert-Report (($view.Gaps -join ' ') -match 'C:\\fixture\\xml') 'Temporary XML warning was hidden by successful process cleanup.'
+}
+Test-ReportCase 'unsupported System EapHost and disabled Operational remain distinct gaps' {
+    $e=New-ReportFixture
+    $e.EventLogs=@(
+        [pscustomobject]@{LogName='System';ProviderFilter='Microsoft-Windows-EapHost';Available=$true;Enabled=$true;QueryStatus='UnsupportedProviderChannel';ErrorCode='LogsAndProvidersDontOverlap';Truncated=$false},
+        [pscustomobject]@{LogName='Microsoft-Windows-EapHost/Operational';ProviderFilter='';Available=$true;Enabled=$false;QueryStatus='NoEvents';ErrorCode=$null;Truncated=$false}
+    )
+    foreach ($log in $e.EventLogs) { $e.Probes+=[pscustomobject]@{Name=('Events:'+$log.LogName+':'+$log.ProviderFilter);Status='Partial';DurationMs=1;Limitations=@('fixture channel limitation')} }
+    $before=$e|ConvertTo-Json -Depth 30 -Compress
+    $view=New-Dot1xReportView -Report (New-ReportObject $e) -Evidence $e
+    Assert-Report (@($view.Gaps|Where-Object {$_ -eq 'System / EapHost: Not applicable on this Windows installation.'}).Count -eq 1) 'Unsupported pairing applicability was not identified by source.'
+    Assert-Report (($view.Gaps -join ' ') -match 'EapHost/Operational: Logging is disabled') 'The independent Operational gap was hidden.'
+    Assert-Report (($view.Gaps -join ' ') -notmatch 'fixture channel limitation') 'Event-specific summaries duplicated raw limitations.'
+    Assert-Report (($e|ConvertTo-Json -Depth 30 -Compress) -ceq $before) 'Applicability presentation changed collected metadata.'
+}
+Test-ReportCase 'supported System EapHost query outcomes add no collection gap' {
+    foreach ($queryStatus in @('Succeeded','NoEvents')) {
+        $e=New-ReportFixture
+        $e.EventLogs=@([pscustomobject]@{LogName='System';ProviderFilter='Microsoft-Windows-EapHost';Available=$true;Enabled=$true;QueryStatus=$queryStatus;Truncated=$false})
+        $e.Probes+=[pscustomobject]@{Name='Events:System:Microsoft-Windows-EapHost';Status='Succeeded';DurationMs=1;Limitations=@()}
+        $view=New-Dot1xReportView -Report (New-ReportObject $e) -Evidence $e
+        Assert-Report ($view.Gaps.Count -eq 0) 'A supported provider/channel query became a collection gap.'
+    }
+}
+Test-ReportCase 'failed and partial wired summaries include distinct recorded reasons' {
+    foreach ($status in @('Failed','Partial')) {
+        $e=New-ReportFixture
+        $reason='Wired fixture result: export failed, exit=5.'
+        $e.Probes+=[pscustomobject]@{Name='Wired';Status=$status;DurationMs=1;CleanupConfirmed=$true;Limitations=@($reason,$reason)}
+        $r=New-ReportObject $e
+        $before=$r|ConvertTo-Json -Depth 30 -Compress
+        $text=Format-Dot1xReport -Report $r -Evidence $e
+        $flat=$text -replace '\s+',' '
+        Assert-Report ($flat -match 'profile assignment is unknown') 'The incomplete-assignment qualification was lost.'
+        Assert-Report (([regex]::Matches($flat,[regex]::Escape($reason))).Count -eq 1) 'The recorded wired reason was missing or duplicated.'
+        Assert-Report ($text -notmatch 'GLOBAL-BOILERPLATE-SENTINEL') 'Recorded reasons brought global boilerplate into compact output.'
+        Assert-Report (($r|ConvertTo-Json -Depth 30 -Compress) -ceq $before) 'Compact reasons changed the full report.'
+    }
+}
+Test-ReportCase 'empty wired limitations and skipped probes keep truthful summaries' {
+    $e=New-ReportFixture
+    $e.Probes+=[pscustomobject]@{Name='Wired';Status='Partial';DurationMs=1;Limitations=@()}
+    $view=New-Dot1xReportView -Report (New-ReportObject $e) -Evidence $e
+    Assert-Report (@($view.Gaps|Where-Object {$_ -eq 'Wired: Wired profiles were not fully read; profile assignment is unknown.'}).Count -eq 1) 'An absent recorded reason changed the fallback summary.'
+    $e.Probes[-1].Status='Skipped'; $e.Probes[-1].Limitations=@('Overall collection deadline reached before this probe.')
+    $view=New-Dot1xReportView -Report (New-ReportObject $e) -Evidence $e
+    Assert-Report (($view.Gaps -join ' ') -match 'Not collected; collection ended before this probe ran.*Overall collection deadline reached') 'Skipped status or its recorded reason was lost.'
+    Assert-Report (($view.Gaps -join ' ') -notmatch 'Wired profiles were not fully read') 'A skipped probe was presented as an attempted collection.'
+}
+Test-ReportCase 'wired reasons and cleanup paths remain visible without duplication' {
+    $e=New-ReportFixture
+    $cleanup='Private wired transport cleanup is incomplete at C:\fixture\xml. Treat remaining files as sensitive.'
+    $reason='Wired fixture result: export failed, exit=5.'
+    $e.Probes+=[pscustomobject]@{Name='Wired';Status='Partial';DurationMs=1;CleanupConfirmed=$false;Limitations=@($cleanup,$reason,$reason)}
+    $view=New-Dot1xReportView -Report (New-ReportObject $e) -Evidence $e
+    $gaps=$view.Gaps -join ' '
+    Assert-Report (([regex]::Matches($gaps,[regex]::Escape($cleanup))).Count -eq 1) 'The cleanup warning or path was lost or duplicated.'
+    Assert-Report (([regex]::Matches($gaps,[regex]::Escape($reason))).Count -eq 1) 'The ordinary recorded reason was lost or duplicated.'
+    Assert-Report ($gaps -match 'Cleanup needs attention.*C:\\fixture\\xml') 'The cleanup warning lost its source path.'
+}
+Test-ReportCase 'ordinary reasons from unrelated collectors stay out of compact output' {
+    $e=New-ReportFixture
+    $e.Probes+=[pscustomobject]@{Name='Wireless';Status='Partial';DurationMs=1;CleanupConfirmed=$true;Limitations=@('UNRELATED-WIRELESS-REASON')}
+    $text=Format-Dot1xReport -Report (New-ReportObject $e) -Evidence $e
+    Assert-Report ($text -notmatch 'UNRELATED-WIRELESS-REASON') 'An unrelated collector reason entered compact output.'
 }
 Test-ReportCase 'disabled and truncated logs are distinct collection gaps' {
     $e=New-ReportFixture
