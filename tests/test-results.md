@@ -2,9 +2,30 @@
 
 Results apply to the listed source hashes, not later changes. CI runs record their tested commit, source SHA-256, UTC time, Windows version, and PowerShell runtime.
 
-Tests ran on Windows 11 IoT Enterprise LTSC (`10.0.26100.0`) with Windows PowerShell `5.1.26100.9278`. They use built-in assertions; no Pester or additional packages are required.
+Tests use built-in assertions. Each receipt identifies its Windows and PowerShell runtime. Historical local runs used Windows 11 IoT Enterprise LTSC (`10.0.26100.0`) and Windows PowerShell `5.1.26100.9278`.
 
-## Client logging helper: 2026-09-08
+## Integrated EapHost tracing and local-time reports: 2026-09-08
+
+[Windows CI run 34225691479](https://github.com/clankerwrangler/windows-8021x-diagnostics/actions/runs/34225691479) passed on Windows Server 2022 (`10.0.20348.0`) with Windows PowerShell `5.1.20348.5499`, at commit `af86aafbc61b49c0135fd8add79ab44efb4dace7`.
+
+- Canonical collector SHA-256: `564c3da2b09909aa80b357c1f8bfcae9823d56bf090b78a52fc2943551e11608`.
+- Canonical helper SHA-256: `2154cf2975c5246a3563ca88717a8ed2917833ec58817f4f03db102c8183e626`.
+- Windows checkout collector SHA-256: `cb1dffc4f6f46e4a0dd5ba7cba23c86fc03fbcadbb88487cc8870b3304d77d35`.
+- Windows checkout helper SHA-256: `e6e95d7c7b09dec0c42a97e531cd4989b5c8559bcf8e17a36c249e73df608ca0`.
+
+The checkout hashes match the canonical files after LF-to-CRLF conversion. All **259 synthetic cases across 11 suites passed**, including 48 report cases and 41 logging-helper cases. These verify local timestamps and daylight-saving offsets, unchanged UTC evidence, inline collection reasons, independent recovery records, legacy baselines, same-process runtime upgrades, and private trace files.
+
+A separate native job passed five lifecycle scenarios:
+
+- Registered synthetic provider: owned session lookup, repeated enable, foreign-session conflict, stop, and finalized ETL.
+- Pre-enabled provider: conflict detection before registration and continued ownership after registration.
+- Changed settings: strict enable validation and identity-based recovery.
+- Fixed EapHost provider: start, repeat, query, stop, and nonempty finalized ETL.
+- Integrated helper: real state files, private directories, and EapHost ETW through default Enable, repeated Enable, and Restore. The original v1 baseline and trace intent remained byte-identical across repeated enable; Restore finalized the ETL and removed the recovery records. Channel and Schannel changes in this integration scenario used mock settings.
+
+The native fixture stopped its owned sessions and removed its scratch output. This run verifies capture lifecycle and report behavior; physical 802.1X authentication and EapHost trace decoding remain separate integration checks.
+
+## Historical run: client logging helper, 2026-09-08
 
 - Collector SHA-256: `31709e1787f57bbcb7fbf5ec04b80923e05f8f2e318d7290f39a25dbf57323d9` (unchanged).
 - Logging helper SHA-256: `1972cfe5757838c8b61b99e743c59ff777348d76d810e1b13c68e6eeda7f3557`.
