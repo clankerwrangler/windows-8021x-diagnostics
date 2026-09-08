@@ -47,3 +47,38 @@ jobs:
           path: ${{ runner.temp }}/dot1x-synthetic-results.log
           if-no-files-found: warn
           retention-days: 14
+
+  native_eaphost_trace:
+    name: Native EapHost trace lifecycle
+    runs-on: windows-2022
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check isolated trace lifecycle
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $PWD 'Get-8021xDiagnostics.ps1')
+          $lease = New-Dot1xPrivateDirectory -Path (Join-Path $env:RUNNER_TEMP ('dot1x-etw-' + [guid]::NewGuid().ToString('N')))
+          $scratch = $lease.Path
+          $lease.Dispose()
+          $resultPath = Join-Path $env:RUNNER_TEMP 'dot1x-native-trace-results.log'
+          ('CI commit=' + $env:GITHUB_SHA + ' utc=' + [datetime]::UtcNow.ToString('o')) | Set-Content -LiteralPath $resultPath
+          $exitCode = 1
+          try {
+            & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-EapHostTraceNative.ps1 -HelperPath (Join-Path $PWD 'Set-8021xLogging.ps1') -ScratchPath $scratch 2>&1 | Tee-Object -FilePath $resultPath -Append
+            $exitCode = $LASTEXITCODE
+          } finally {
+            if ($exitCode -eq 0) { Remove-Item -LiteralPath $scratch -Recurse -Force }
+          }
+          exit $exitCode
+      - name: Upload native trace test receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-eaphost-native-trace-results
+          path: ${{ runner.temp }}/dot1x-native-trace-results.log
+          if-no-files-found: warn
+          retention-days: 14

@@ -23,7 +23,7 @@ function Assert-Throws {
     Assert-True ($message -match $Pattern) ('Expected failure matching: ' + $Pattern + '; actual: ' + $message)
 }
 function New-TestLoggingStore {
-    $store = [pscustomobject]@{ Json=$null; Saves=0; Deletes=0; FailSave=$false; FailDelete=$false }
+    $store = [pscustomobject]@{ Json=$null; Saves=0; Deletes=0; FailSave=$false; FailDelete=$false; TraceJson=$null; TraceSaves=0; TraceDeletes=0; FailTraceSave=$false; FailTraceDelete=$false }
     $store | Add-Member ScriptMethod Read { return $this.Json }
     $store | Add-Member ScriptMethod SaveNew {
         param($text)
@@ -34,6 +34,17 @@ function New-TestLoggingStore {
     $store | Add-Member ScriptMethod DeleteBaseline {
         if ($this.FailDelete) { throw 'Synthetic cleanup failure' }
         $this.Json=$null; $this.Deletes++
+    }
+    $store | Add-Member ScriptMethod ReadTrace { return $this.TraceJson }
+    $store | Add-Member ScriptMethod SaveNewTrace {
+        param($text)
+        if ($this.FailTraceSave) { throw 'Synthetic trace intent disk failure' }
+        if ($null -ne $this.TraceJson) { throw 'Trace intent overwrite' }
+        $this.TraceJson=$text; $this.TraceSaves++
+    }
+    $store | Add-Member ScriptMethod DeleteTrace {
+        if ($this.FailTraceDelete) { throw 'Synthetic trace intent cleanup failure' }
+        $this.TraceJson=$null; $this.TraceDeletes++
     }
     return $store
 }
@@ -59,6 +70,9 @@ function Reset-TestLogging {
     $script:nativeFailureText = 'Synthetic native denied or unavailable'
     $script:failSchannel = $false
     $script:store = New-TestLoggingStore
+    $script:traceCalls=New-Object 'System.Collections.Generic.List[string]'
+    $script:traceActive=@{}; $script:traceFiles=@{}
+    $script:traceFailureAction=''; $script:traceFailAfterStart=$false; $script:traceFileFailure=$false; $script:traceLeaseDeletes=0
 }
 # Only this adapter is replaced: enumeration, XML parsing, exit handling, channel
 # allowlisting, baseline serialization, and enable/restore orchestration stay real.
@@ -91,9 +105,40 @@ function Set-LoggingSchannel {
     $script:schannelWrites.Add($Setting)
     $script:schannel = [pscustomobject]@{ Present=$Setting.Present; Value=$Setting.Value }
 }
+function New-LoggingTraceLease {
+    param([string]$Path,[string]$Caller,[bool]$Create)
+    $lease=[pscustomobject]@{Path=$Path}
+    $lease | Add-Member ScriptMethod ValidateTraceFile {
+        param($Name,$AllowMissing,$Finalized)
+        if ($script:traceFileFailure) { throw 'Synthetic trace output validation failure' }
+        $file=[IO.Path]::Combine($this.Path,$Name)
+        if ($script:traceFiles.ContainsKey($file)) { return $true }
+        if ($AllowMissing) { return $false }
+        throw 'Synthetic missing trace file'
+    }
+    $lease | Add-Member ScriptMethod DeleteEmptyDirectory { $script:traceLeaseDeletes++ }
+    $lease | Add-Member ScriptMethod Dispose { }
+    return $lease
+}
+function Invoke-LoggingTraceNative {
+    param([string]$Action,$State)
+    if ($null -eq $script:store.TraceJson) { throw 'An ETW operation preceded durable trace intent.' }
+    $script:traceCalls.Add($Action)
+    if ($script:traceFailureAction -eq $Action) { throw ('Synthetic trace '+$Action+' failure') }
+    $id=$State.SessionGuid
+    if ($Action -eq 'Query') {
+        if ($script:traceActive.ContainsKey($id)) { return [pscustomobject]@{Handle=1;SessionGuid=$id} }
+        return $null
+    }
+    if ($Action -eq 'Stop') { $script:traceActive.Remove($id); return }
+    if ($Action -ne 'Ensure') { throw 'Unexpected ETW action' }
+    $script:traceActive[$id]=$true; $script:traceFiles[$State.TracePath]=$true
+    if ($script:traceFailAfterStart) { throw 'Synthetic provider enable failure after session start' }
+    return [pscustomobject]@{Handle=1;SessionGuid=$id}
+}
 function Invoke-TestLogging {
-    param([bool]$Restoring=$false, [bool]$Schannel=$false)
-    Invoke-LoggingSession $script:store 'fixture-machine' 'fixture-caller' $Restoring $Schannel
+    param([bool]$Restoring=$false, [bool]$Schannel=$false, [bool]$EventsOnly=$false, [string]$OutputDirectory='')
+    Invoke-LoggingSession $script:store 'fixture-machine' 'fixture-caller' $Restoring $Schannel $OutputDirectory $EventsOnly
 }
 function Get-TestMutations { @($script:nativeCalls | Where-Object { $_[0] -eq 'sl' }) }
 
@@ -102,7 +147,7 @@ Test-Case 'helper parses, imports without execution, and documents both modes' {
     $ast = [Management.Automation.Language.Parser]::ParseFile($helperPath,[ref]$tokens,[ref]$errors)
     Assert-Equal @($errors).Count 0 'Helper parse errors.'
     Assert-True ([bool](Get-Command Invoke-LoggingSession)) 'Import did not expose the orchestration function.'
-    Assert-True (-not ('Dot1xLogging.Store' -as [type])) 'Dot-source compiled platform code.'
+    Assert-True (-not ('Dot1xLoggingV2.Store' -as [type])) 'Dot-source compiled platform code.'
     Assert-True ((Get-Help $helperPath -Full).Synopsis -match 'client') 'Help omits client scope.'
     $commands = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] },$true))
     foreach ($command in $commands) {
@@ -271,17 +316,17 @@ try {
     Test-Case 'state store compiles and preserves private durable baseline across reopening and retries' {
         Initialize-LoggingStore
         $path = Join-Path $caseRoot 'private'
-        $lease = New-Object Dot1xLogging.Store($path,$caller,$true)
+        $lease = New-Object Dot1xLoggingV2.Store($path,$caller,$true)
         try {
             Assert-True ($null -eq $lease.Read()) 'Fresh store has a baseline.'
             $lease.SaveNew('{"fixture":1}')
             Assert-Throws { $lease.SaveNew('{"fixture":2}') } 'must not be overwritten'
-            Assert-Throws { $other = New-Object Dot1xLogging.Store($path,$caller,$true); try { $other.Read() } finally { $other.Dispose() } } 'open failed'
+            Assert-Throws { $other = New-Object Dot1xLoggingV2.Store($path,$caller,$true); try { $other.Read() } finally { $other.Dispose() } } 'open failed'
             $acl = (New-Object IO.DirectoryInfo($path)).GetAccessControl()
             Assert-True $acl.AreAccessRulesProtected 'Directory is not protected.'
             Assert-Equal $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value $caller 'Wrong directory owner.'
         } finally { $lease.Dispose() }
-        $lease = New-Object Dot1xLogging.Store($path,$caller,$true)
+        $lease = New-Object Dot1xLoggingV2.Store($path,$caller,$true)
         try { Assert-Equal $lease.Read() '{"fixture":1}' 'Baseline did not survive reopening.'; $lease.DeleteBaseline() }
         finally { $lease.Dispose() }
         Assert-True (-not [IO.File]::Exists((Join-Path $path 'state.json'))) 'Completed restore left the baseline.'
@@ -290,22 +335,22 @@ try {
         $path = Join-Path $caseRoot 'unsafe'
         $null = [IO.Directory]::CreateDirectory($path)
         $before = (Get-Acl -LiteralPath $path).Sddl
-        Assert-Throws { $lease = New-Object Dot1xLogging.Store($path,$caller,$true); $lease.Dispose() } 'unsafe'
+        Assert-Throws { $lease = New-Object Dot1xLoggingV2.Store($path,$caller,$true); $lease.Dispose() } 'unsafe'
         Assert-Equal (Get-Acl -LiteralPath $path).Sddl $before 'Unsafe directory ACL was silently replaced.'
     }
     Test-Case 'state store rejects foreign owner, inherited state ACL, and oversized state' {
         $path = Join-Path $caseRoot 'validation'
-        $lease = New-Object Dot1xLogging.Store($path,$caller,$true)
+        $lease = New-Object Dot1xLoggingV2.Store($path,$caller,$true)
         try { $lease.SaveNew('{"fixture":1}') } finally { $lease.Dispose() }
-        Assert-Throws { $other = New-Object Dot1xLogging.Store($path,'S-1-5-21-1-2-3-1001',$true); $other.Dispose() } 'unsafe'
+        Assert-Throws { $other = New-Object Dot1xLoggingV2.Store($path,'S-1-5-21-1-2-3-1001',$true); $other.Dispose() } 'unsafe'
         $file = Join-Path $path 'state.json'
         $acl = Get-Acl -LiteralPath $file; $original = $acl.Sddl
         $acl.SetAccessRuleProtection($false,$true); Set-Acl -LiteralPath $file -AclObject $acl
-        $lease = New-Object Dot1xLogging.Store($path,$caller,$true)
+        $lease = New-Object Dot1xLoggingV2.Store($path,$caller,$true)
         try { Assert-Throws { $lease.Read() } 'unsafe' } finally { $lease.Dispose() }
         $acl.SetSecurityDescriptorSddlForm($original); Set-Acl -LiteralPath $file -AclObject $acl
         [IO.File]::WriteAllText($file,('x' * 65537))
-        $lease = New-Object Dot1xLogging.Store($path,$caller,$true)
+        $lease = New-Object Dot1xLoggingV2.Store($path,$caller,$true)
         try { Assert-Throws { $lease.Read() } 'size is invalid' } finally { $lease.Dispose() }
     }
     Test-Case 'state store rejects reparse paths and hard-linked baselines' {
@@ -313,15 +358,15 @@ try {
         $null = [IO.Directory]::CreateDirectory($target)
         $junction = Join-Path $caseRoot 'junction'
         $null = New-Item -Path $junction -ItemType Junction -Target $target -ErrorAction Stop
-        try { Assert-Throws { $lease = New-Object Dot1xLogging.Store((Join-Path $junction 'state'),$caller,$true); $lease.Dispose() } 'reparse point' }
+        try { Assert-Throws { $lease = New-Object Dot1xLoggingV2.Store((Join-Path $junction 'state'),$caller,$true); $lease.Dispose() } 'reparse point' }
         finally { [IO.Directory]::Delete($junction) }
         Assert-Equal @([IO.Directory]::EnumerateFileSystemEntries($target)).Count 0 'Reparse target was changed.'
         $path = Join-Path $caseRoot 'hardlink'
-        $lease = New-Object Dot1xLogging.Store($path,$caller,$true)
+        $lease = New-Object Dot1xLoggingV2.Store($path,$caller,$true)
         try { $lease.SaveNew('{"fixture":1}') } finally { $lease.Dispose() }
         $file = Join-Path $path 'state.json'
         $null = New-Item -Path (Join-Path $caseRoot 'alias.json') -ItemType HardLink -Target $file -ErrorAction Stop
-        $lease = New-Object Dot1xLogging.Store($path,$caller,$true)
+        $lease = New-Object Dot1xLoggingV2.Store($path,$caller,$true)
         try { Assert-Throws { $lease.Read() } 'hard link' } finally { $lease.Dispose() }
         Assert-Equal ([IO.File]::ReadAllText($file)) '{"fixture":1}' 'Hard-linked baseline was modified.'
     }

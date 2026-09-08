@@ -12,6 +12,11 @@ Repeated Enable uses the original baseline, not the currently enabled settings.
 .PARAMETER Restore
 Restore original enabled states, sizes, and optional Schannel value. On any failure,
 keep the baseline and rerun Restore with the same elevated account on the same machine.
+.PARAMETER OutputDirectory
+With Enable, place a new private EapHost trace folder under this report parent.
+The default is Dot1x-Report in the current directory. Restore uses the saved path.
+.PARAMETER EventsOnly
+With Enable, prepare event channels and optional Schannel logging only.
 .PARAMETER IncludeSchannel
 With Enable, also save the Schannel EventLogging DWORD (or its absence) and set it to 7.
 A reboot is required to apply Schannel changes, including restoration. No reboot is run.
@@ -25,7 +30,9 @@ A reboot is required to apply Schannel changes, including restoration. No reboot
 param(
     [Parameter(ParameterSetName='Enable')][switch]$Enable,
     [Parameter(ParameterSetName='Restore')][switch]$Restore,
-    [Parameter(ParameterSetName='Enable')][switch]$IncludeSchannel
+    [Parameter(ParameterSetName='Enable')][switch]$IncludeSchannel,
+    [Parameter(ParameterSetName='Enable')][string]$OutputDirectory,
+    [Parameter(ParameterSetName='Enable')][switch]$EventsOnly
 )
 
 function Get-LoggingCoreChannels {
@@ -198,8 +205,21 @@ function Invoke-LoggingChanges {
     if ($failures.Count) { throw ("Logging changes incomplete. Baseline retained; rerun -Restore to recover.`n" + ($failures -join "`n")) }
 }
 
+function Resolve-LoggingOutputDirectory {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { $Path = Join-Path -Path (Get-Location).Path -ChildPath 'Dot1x-Report' }
+    [System.Management.Automation.ProviderInfo]$provider = $null
+    [System.Management.Automation.PSDriveInfo]$drive = $null
+    $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path,[ref]$provider,[ref]$drive)
+    if ($provider.Name -ne 'FileSystem') { throw 'Trace output must use the FileSystem provider.' }
+    $fullPath = [IO.Path]::GetFullPath($fullPath)
+    if ($fullPath -notmatch '^[A-Za-z]:\\' -or $fullPath.Substring(2).Contains(':')) { throw 'Trace output requires a local directory path.' }
+    if ($fullPath.Length -gt 3) { $fullPath = $fullPath.TrimEnd('\') }
+    return $fullPath
+}
+
 function Initialize-LoggingStore {
-    if ('Dot1xLogging.Store' -as [type]) { return }
+    if ('Dot1xLoggingV2.Store' -as [type]) { return }
     # Like the collector's private-file path: protected ACLs, pinned non-reparse
     # ancestors, create-new files, and no path-based deletion of an open baseline.
     Add-Type -TypeDefinition @'
@@ -212,49 +232,16 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
-namespace Dot1xLogging {
+namespace Dot1xLoggingV2 {
     [StructLayout(LayoutKind.Sequential)] internal struct SA { public int Size; public IntPtr Descriptor; public int Inherit; }
     [StructLayout(LayoutKind.Sequential)] internal struct Info {
         public uint Attributes; public System.Runtime.InteropServices.ComTypes.FILETIME Created,Accessed,Written;
         public uint Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;
     }
     [StructLayout(LayoutKind.Sequential)] internal struct Disposition { [MarshalAs(UnmanagedType.Bool)] public bool Delete; }
-    public sealed class Store : IDisposable {
-        [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr sa,uint mode,uint flags,IntPtr template);
-        [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateDirectoryW(string path,ref SA sa);
+    internal static class PrivatePaths {
         [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle,out Info info);
-        [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle handle,int kind,ref Disposition value,uint size);
-        readonly List<SafeFileHandle> directories=new List<SafeFileHandle>();
-        readonly string path,sid;
-        FileStream baseline;
-        public Store(string directory,string caller,bool create) {
-            path=Path.Combine(directory,"state.json"); sid=caller;
-            string full=Path.GetFullPath(directory);
-            if(full.Length<4 || full[1]!=':' || full[2]!='\\' || full!=directory) throw new IOException("State requires a canonical local path.");
-            var ancestors=new List<string>();
-            for(var d=new DirectoryInfo(full);d!=null;d=d.Parent) ancestors.Add(d.FullName);
-            ancestors.Reverse();
-            try {
-                foreach(string ancestor in ancestors) {
-                    if(ancestor==full && create) {
-                        byte[] bytes=Security(true).GetSecurityDescriptorBinaryForm();
-                        GCHandle pinned=GCHandle.Alloc(bytes,GCHandleType.Pinned);
-                        try {
-                            SA sa=new SA(); sa.Size=Marshal.SizeOf(typeof(SA)); sa.Descriptor=pinned.AddrOfPinnedObject();
-                            if(!CreateDirectoryW(full,ref sa)) {
-                                int error=Marshal.GetLastWin32Error();
-                                if(error!=183) throw new Win32Exception(error,"Private logging directory creation failed");
-                            }
-                        } finally { pinned.Free(); }
-                    }
-                    SafeFileHandle handle=CreateFileW(ancestor,0x20080,1,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
-                    if(handle.IsInvalid) { int error=Marshal.GetLastWin32Error(); handle.Dispose(); throw new Win32Exception(error,"Logging directory open failed"); }
-                    directories.Add(handle); CheckFile(handle,true);
-                }
-                Validate(Directory.GetAccessControl(full),true);
-            } catch { Dispose(); throw; }
-        }
-        FileSystemSecurity Security(bool directory) {
+        internal static FileSystemSecurity Security(string sid,bool directory) {
             FileSystemSecurity acl=directory ? (FileSystemSecurity)new DirectorySecurity() : new FileSecurity();
             acl.SetOwner(new SecurityIdentifier(sid)); acl.SetAccessRuleProtection(true,false);
             foreach(string value in new HashSet<string>(new string[]{sid,"S-1-5-18","S-1-5-32-544"})) {
@@ -263,7 +250,7 @@ namespace Dot1xLogging {
             }
             return acl;
         }
-        void Validate(FileSystemSecurity acl,bool directory) {
+        internal static void Validate(FileSystemSecurity acl,string sid,bool directory) {
             var allowed=new HashSet<string>(new string[]{sid,"S-1-5-18","S-1-5-32-544"});
             if(acl.GetOwner(typeof(SecurityIdentifier)).Value!=sid || !acl.AreAccessRulesProtected) throw new IOException("Logging state owner or inheritance is unsafe.");
             foreach(FileSystemAccessRule rule in acl.GetAccessRules(true,true,typeof(SecurityIdentifier))) {
@@ -272,13 +259,265 @@ namespace Dot1xLogging {
             }
             if(allowed.Count!=0) throw new IOException("Logging state ACL is incomplete.");
         }
-        static void CheckFile(SafeFileHandle handle,bool directory) {
+        internal static void ValidateTraceSecurity(FileSystemSecurity acl,string sid) {
+            var allowed=new HashSet<string>(new string[]{sid,"S-1-5-18","S-1-5-32-544"});
+            var effective=new HashSet<string>();
+            if(!allowed.Contains(acl.GetOwner(typeof(SecurityIdentifier)).Value)) throw new IOException("Trace file owner is unsafe.");
+            foreach(FileSystemAccessRule rule in acl.GetAccessRules(true,true,typeof(SecurityIdentifier))) {
+                string principal=rule.IdentityReference.Value;
+                if(!allowed.Contains(principal) || rule.AccessControlType!=AccessControlType.Allow || rule.FileSystemRights!=FileSystemRights.FullControl) throw new IOException("Trace file ACL is unsafe.");
+                if((rule.PropagationFlags & PropagationFlags.InheritOnly)==0) effective.Add(principal);
+            }
+            if(!effective.SetEquals(allowed)) throw new IOException("Trace file ACL is incomplete.");
+        }
+        internal static void CheckFile(SafeFileHandle handle,bool directory) {
             Info info;
             if(!GetFileInformationByHandle(handle,out info)) throw new Win32Exception(Marshal.GetLastWin32Error(),"Logging state attributes failed");
             if((info.Attributes & 0x400)!=0 || ((info.Attributes & 0x10)!=0)!=directory || (!directory && info.Links!=1)) throw new IOException("Logging state contains a reparse point, hard link, or wrong item type.");
         }
-        FileStream Open(uint mode,IntPtr descriptor) {
-            var handle=CreateFileW(path,0xC0030000,0,descriptor,mode,0x00200000,IntPtr.Zero);
+    }
+    public sealed class DirectoryLease : IDisposable {
+        [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr sa,uint mode,uint flags,IntPtr template);
+        [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateDirectoryW(string path,ref SA sa);
+        [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle handle,int kind,ref Disposition value,uint size);
+        readonly List<SafeFileHandle> directories=new List<SafeFileHandle>();
+        bool createdLeaf;
+        readonly string sid;
+        public string Path { get; private set; }
+        public DirectoryLease(string directory,string caller,bool createParents,bool requireNew) : this(directory,caller,createParents,requireNew,requireNew) { }
+        internal static DirectoryLease OpenState(string directory,string caller,bool create) { return new DirectoryLease(directory,caller,false,create,false); }
+        DirectoryLease(string directory,string caller,bool createParents,bool createLeaf,bool requireNew) {
+            string full=System.IO.Path.GetFullPath(directory);
+            if(full.Length<4 || full[1]!=':' || full[2]!='\\' || full!=directory || full.EndsWith("\\",StringComparison.Ordinal) || full.IndexOf(':',2)>=0) throw new IOException("Trace output requires a canonical local directory path.");
+            if(createParents && !requireNew) throw new ArgumentException("Reopening trace output cannot create directories.");
+            Path=full; sid=caller;
+            var ancestors=new List<string>();
+            for(var d=new DirectoryInfo(full);d!=null;d=d.Parent) ancestors.Add(d.FullName);
+            ancestors.Reverse();
+            try {
+                foreach(string ancestor in ancestors) {
+                    bool leaf=ancestor==full;
+                    bool created=false;
+                    if((leaf && createLeaf) || (!leaf && createParents && ancestor.Length>3)) {
+                        byte[] bytes=PrivatePaths.Security(caller,true).GetSecurityDescriptorBinaryForm();
+                        GCHandle pinned=GCHandle.Alloc(bytes,GCHandleType.Pinned);
+                        try {
+                            SA sa=new SA(); sa.Size=Marshal.SizeOf(typeof(SA)); sa.Descriptor=pinned.AddrOfPinnedObject();
+                            created=CreateDirectoryW(ancestor,ref sa);
+                            if(!created) {
+                                int error=Marshal.GetLastWin32Error();
+                                if(error!=183 || (leaf && requireNew)) throw new Win32Exception(error,"Private trace directory creation failed: "+ancestor);
+                            }
+                        } finally { pinned.Free(); }
+                    }
+                    uint access=(leaf && created && requireNew) ? 0x30080U : 0x20080U;
+                    SafeFileHandle handle=CreateFileW(ancestor,access,1,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+                    if(handle.IsInvalid) { int error=Marshal.GetLastWin32Error(); handle.Dispose(); throw new Win32Exception(error,"Trace directory open failed: "+ancestor); }
+                    directories.Add(handle); PrivatePaths.CheckFile(handle,true);
+                    if(created || leaf) PrivatePaths.Validate(Directory.GetAccessControl(ancestor),caller,true);
+                    if(leaf) createdLeaf=created && requireNew;
+                }
+            } catch { Dispose(); throw; }
+        }
+        public bool ValidateTraceFile(string fileName,bool allowMissing) { return ValidateTraceFile(fileName,allowMissing,false); }
+        public bool ValidateTraceFile(string fileName,bool allowMissing,bool finalized) {
+            if(directories.Count==0) throw new ObjectDisposedException("DirectoryLease");
+            if(String.IsNullOrEmpty(fileName) || fileName=="." || fileName==".." || fileName.IndexOfAny(System.IO.Path.GetInvalidFileNameChars())>=0) throw new IOException("Trace file must be one local filename.");
+            string filePath=System.IO.Path.Combine(Path,fileName);
+            using(SafeFileHandle handle=CreateFileW(filePath,0x20080,finalized ? 1U : 3U,IntPtr.Zero,3,0x00200000,IntPtr.Zero)) {
+                if(handle.IsInvalid) {
+                    int error=Marshal.GetLastWin32Error();
+                    if(allowMissing && error==2) return false;
+                    throw new Win32Exception(error,"Trace file validation open failed");
+                }
+                PrivatePaths.CheckFile(handle,false);
+                PrivatePaths.ValidateTraceSecurity(File.GetAccessControl(filePath,AccessControlSections.Access|AccessControlSections.Owner),sid);
+            }
+            return true;
+        }
+        public void DeleteEmptyDirectory() {
+            if(!createdLeaf || directories.Count==0) throw new InvalidOperationException("Only this lease's new empty trace directory can be removed.");
+            Disposition value=new Disposition(); value.Delete=true;
+            if(!SetFileInformationByHandle(directories[directories.Count-1],4,ref value,4)) throw new Win32Exception(Marshal.GetLastWin32Error(),"Empty trace directory cleanup failed");
+            createdLeaf=false;
+        }
+        public void Dispose() {
+            for(int i=directories.Count-1;i>=0;i--) directories[i].Dispose();
+            directories.Clear();
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)] internal struct TraceWnode {
+        public uint BufferSize,ProviderId;
+        public ulong HistoricalContext;
+        public long TimeStamp;
+        public Guid Guid;
+        public uint ClientContext,Flags;
+    }
+    [StructLayout(LayoutKind.Sequential)] internal struct TraceProperties {
+        public TraceWnode Wnode;
+        public uint BufferSize,MinimumBuffers,MaximumBuffers,MaximumFileSize,LogFileMode,FlushTimer,EnableFlags;
+        public int AgeLimit;
+        public uint NumberOfBuffers,FreeBuffers,EventsLost,BuffersWritten,LogBuffersLost,RealTimeBuffersLost;
+        public IntPtr LoggerThreadId;
+        public uint LogFileNameOffset,LoggerNameOffset;
+    }
+    public sealed class TraceSnapshot {
+        public ulong Handle;
+        public Guid SessionGuid;
+        public string SessionName,TracePath;
+        public uint LogFileMode,MaximumFileSize,EventsLost,LogBuffersLost;
+    }
+    public static class EapHostTrace {
+        static readonly Guid Provider=new Guid("5f31090b-d990-4e91-b16d-46121d0255aa");
+        const uint CircularMode=0x10000002,LimitMiB=256,NotFound=4201,GuidNotFound=4200;
+        const int StringChars=1025,ProviderInfoLimit=65536;
+        [DllImport("advapi32.dll",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern uint StartTraceW(out ulong handle,string name,IntPtr properties);
+        [DllImport("advapi32.dll",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern uint ControlTraceW(ulong handle,string name,IntPtr properties,uint code);
+        [DllImport("advapi32.dll",ExactSpelling=true)] static extern uint EnableTraceEx2(ulong handle,ref Guid provider,uint code,byte level,ulong any,ulong all,uint timeout,IntPtr parameters);
+        [DllImport("advapi32.dll",ExactSpelling=true)] static extern uint EnumerateTraceGuidsEx(int kind,ref Guid provider,uint inputSize,IntPtr buffer,uint size,out uint returned);
+        static int HeaderSize { get { return Marshal.SizeOf(typeof(TraceProperties)); } }
+        static int PropertiesSize { get { return HeaderSize+StringChars*4; } }
+        static IntPtr NewProperties(Guid id,string path,bool starting) {
+            IntPtr memory=Marshal.AllocHGlobal(PropertiesSize);
+            try {
+                Marshal.Copy(new byte[PropertiesSize],0,memory,PropertiesSize);
+                var p=new TraceProperties();
+                p.Wnode.BufferSize=(uint)PropertiesSize; p.Wnode.Guid=id; p.Wnode.Flags=0x20000;
+                p.LoggerNameOffset=(uint)HeaderSize; p.LogFileNameOffset=(uint)(HeaderSize+StringChars*2);
+                if(starting) {
+                    p.Wnode.ClientContext=1; p.BufferSize=64; p.MinimumBuffers=2; p.MaximumBuffers=16;
+                    p.MaximumFileSize=LimitMiB; p.LogFileMode=CircularMode; p.FlushTimer=5;
+                    byte[] bytes=Encoding.Unicode.GetBytes(path+"\0");
+                    if(bytes.Length>StringChars*2) throw new IOException("Trace path exceeds the ETW limit.");
+                    Marshal.Copy(bytes,0,IntPtr.Add(memory,(int)p.LogFileNameOffset),bytes.Length);
+                }
+                Marshal.StructureToPtr(p,memory,false); return memory;
+            } catch { Marshal.FreeHGlobal(memory); throw; }
+        }
+        static string ReadName(IntPtr memory,uint offset) {
+            if(offset<(uint)HeaderSize || (offset&1)!=0 || offset>(uint)(PropertiesSize-2)) throw new IOException("ETW returned an invalid string offset.");
+            int count=Math.Min(1024,(PropertiesSize-(int)offset)/2);
+            for(int i=0;i<=count;i++) {
+                if((long)offset+(long)i*2+2>PropertiesSize) break;
+                if(Marshal.ReadInt16(memory,(int)offset+i*2)==0) return Marshal.PtrToStringUni(IntPtr.Add(memory,(int)offset),i);
+            }
+            throw new IOException("ETW returned an unterminated name.");
+        }
+        static void CheckIdentity(Guid id,string name,string path) {
+            if(id==Guid.Empty || name!="Dot1xLogging-EapHost-"+id.ToString("N")) throw new IOException("Trace session identity is invalid.");
+            if(String.IsNullOrWhiteSpace(path) || path.Length>1024 || Path.GetFullPath(path)!=path || Path.GetFileName(path)!="EapHost.etl" || new DirectoryInfo(Path.GetDirectoryName(path)).Name!="EapHost-Trace-"+id.ToString("N")) throw new IOException("Trace output identity is invalid.");
+        }
+        static TraceSnapshot QueryRaw(ulong handle,string name) {
+            IntPtr memory=NewProperties(Guid.Empty,null,false);
+            try {
+                uint code=ControlTraceW(handle,name,memory,0);
+                if(code==NotFound) return null;
+                if(code!=0) throw new Win32Exception((int)code,"ETW session query failed");
+                var p=(TraceProperties)Marshal.PtrToStructure(memory,typeof(TraceProperties));
+                if(p.Wnode.BufferSize>(uint)PropertiesSize || p.Wnode.HistoricalContext==0) throw new IOException("ETW returned invalid session properties.");
+                return new TraceSnapshot { Handle=p.Wnode.HistoricalContext,SessionGuid=p.Wnode.Guid,SessionName=ReadName(memory,p.LoggerNameOffset),TracePath=ReadName(memory,p.LogFileNameOffset),LogFileMode=p.LogFileMode,MaximumFileSize=p.MaximumFileSize,EventsLost=p.EventsLost,LogBuffersLost=p.LogBuffersLost };
+            } finally { Marshal.FreeHGlobal(memory); }
+        }
+        static TraceSnapshot QueryOwned(Guid id,string name,string path,bool checkSettings) {
+            CheckIdentity(id,name,path);
+            TraceSnapshot found=QueryRaw(0,name);
+            if(found!=null) {
+                if(found.SessionGuid!=id || !String.Equals(found.SessionName,name,StringComparison.Ordinal) || !String.Equals(found.TracePath,path,StringComparison.OrdinalIgnoreCase)) throw new IOException("Trace session identity or output differs from the saved intent.");
+                if(checkSettings && (found.LogFileMode!=CircularMode || found.MaximumFileSize!=LimitMiB)) throw new IOException("Trace session settings differ from the bounded capture settings.");
+            }
+            return found;
+        }
+        public static TraceSnapshot Query(Guid id,string name,string path) { return QueryOwned(id,name,path,true); }
+        static bool IsOwnedLogger(ushort logger,TraceSnapshot owned) {
+            if(owned==null) return false;
+            TraceSnapshot found=QueryRaw(logger,null);
+            if(found==null) throw new IOException("An enabled provider session disappeared during inspection; retry trace preparation.");
+            return found.Handle==owned.Handle && found.SessionGuid==owned.SessionGuid && String.Equals(found.SessionName,owned.SessionName,StringComparison.Ordinal) && String.Equals(found.TracePath,owned.TracePath,StringComparison.OrdinalIgnoreCase);
+        }
+        internal static void CheckProvider(Guid provider,TraceSnapshot owned) {
+            IntPtr memory=Marshal.AllocHGlobal(ProviderInfoLimit);
+            try {
+                uint used=0,code=0;
+                for(int attempt=0;attempt<3;attempt++) {
+                    code=EnumerateTraceGuidsEx(1,ref provider,16,memory,ProviderInfoLimit,out used);
+                    if(code!=122) break;
+                    if(used>ProviderInfoLimit) throw new IOException("ETW provider metadata exceeds the inspection bound.");
+                }
+                if(code==GuidNotFound) return;
+                if(code!=0) throw new Win32Exception((int)code,"ETW provider enablement query failed");
+                if(used<8 || used>ProviderInfoLimit) throw new IOException("ETW provider metadata size is invalid.");
+                uint instances=unchecked((uint)Marshal.ReadInt32(memory,0));
+                if(instances>4096) throw new IOException("ETW provider instance count is invalid.");
+                long position=8;
+                for(uint i=0;i<instances;i++) {
+                    if(position+16>used) throw new IOException("ETW provider instance is truncated.");
+                    uint next=unchecked((uint)Marshal.ReadInt32(memory,(int)position));
+                    uint count=unchecked((uint)Marshal.ReadInt32(memory,(int)position+4));
+                    long end=position+16+(long)count*32;
+                    if(end>used || count>2048) throw new IOException("ETW provider enablement data is truncated.");
+                    for(uint j=0;j<count;j++) {
+                        int offset=(int)(position+16+(long)j*32);
+                        uint enabled=unchecked((uint)Marshal.ReadInt32(memory,offset));
+                        if(enabled>1) throw new IOException("ETW provider enablement state is invalid.");
+                        ushort logger=unchecked((ushort)Marshal.ReadInt16(memory,offset+6));
+                        if(enabled!=0 && !IsOwnedLogger(logger,owned)) throw new IOException("EapHost tracing is already enabled by another session.");
+                    }
+                    if(i+1<instances) {
+                        if(next<16+(long)count*32 || position+next>=used) throw new IOException("ETW provider instance offset is invalid.");
+                        position+=next;
+                    } else if(next!=0) throw new IOException("ETW provider instance list is incomplete.");
+                }
+            } finally { Marshal.FreeHGlobal(memory); }
+        }
+        internal static TraceSnapshot EnsureForProvider(Guid provider,Guid id,string name,string path) {
+            TraceSnapshot found=Query(id,name,path);
+            CheckProvider(provider,found);
+            if(found==null) {
+                if(File.Exists(path) || Directory.Exists(path)) throw new IOException("The saved ETL already exists; retain it and allocate a fresh trace intent.");
+                IntPtr memory=NewProperties(id,path,true);
+                try {
+                    ulong handle; uint code=StartTraceW(out handle,name,memory);
+                    if(code!=0) throw new Win32Exception((int)code,"ETW session start failed");
+                } finally { Marshal.FreeHGlobal(memory); }
+                found=Query(id,name,path);
+                if(found==null) throw new IOException("The new ETW session is not running.");
+                CheckProvider(provider,found);
+            }
+            uint enabled=EnableTraceEx2(found.Handle,ref provider,1,0,0x4000ffffUL,0,5000,IntPtr.Zero);
+            if(enabled!=0) throw new Win32Exception((int)enabled,"EapHost provider enable failed");
+            TraceSnapshot verified=Query(id,name,path);
+            if(verified==null) throw new IOException("The enabled ETW session is not running.");
+            CheckProvider(provider,verified);
+            return verified;
+        }
+        public static TraceSnapshot Ensure(Guid id,string name,string path) { return EnsureForProvider(Provider,id,name,path); }
+        public static void Stop(Guid id,string name,string path) {
+            TraceSnapshot found=QueryOwned(id,name,path,false);
+            if(found==null) return;
+            IntPtr memory=NewProperties(id,null,false);
+            uint code;
+            try { code=ControlTraceW(found.Handle,null,memory,1); }
+            finally { Marshal.FreeHGlobal(memory); }
+            if(code!=0 && code!=NotFound && code!=234) throw new Win32Exception((int)code,"ETW session stop failed");
+            if(QueryOwned(id,name,path,false)!=null) throw new IOException("The owned ETW session is still running; retry Restore.");
+        }
+    }
+    public sealed class Store : IDisposable {
+        [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr sa,uint mode,uint flags,IntPtr template);
+        [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle handle,int kind,ref Disposition value,uint size);
+        readonly string path,tracePath,sid;
+        readonly DirectoryLease directoryLease;
+        FileStream baseline,traceIntent;
+        public Store(string directory,string caller,bool create) {
+            path=Path.Combine(directory,"state.json"); tracePath=Path.Combine(directory,"eaphost-trace.json"); sid=caller;
+            directoryLease=DirectoryLease.OpenState(directory,caller,create);
+        }
+        FileSystemSecurity Security(bool directory) { return PrivatePaths.Security(sid,directory); }
+        void Validate(FileSystemSecurity acl,bool directory) { PrivatePaths.Validate(acl,sid,directory); }
+        static void CheckFile(SafeFileHandle handle,bool directory) { PrivatePaths.CheckFile(handle,directory); }
+        FileStream Open(string file,uint mode,IntPtr descriptor) {
+            var handle=CreateFileW(file,0xC0030000,0,descriptor,mode,0x00200000,IntPtr.Zero);
             if(handle.IsInvalid) {
                 int error=Marshal.GetLastWin32Error(); handle.Dispose();
                 if(mode==3 && error==2) return null;
@@ -287,18 +526,18 @@ namespace Dot1xLogging {
             try { CheckFile(handle,false); return new FileStream(handle,FileAccess.ReadWrite); }
             catch { handle.Dispose(); throw; }
         }
-        public string Read() {
-            if(baseline!=null) throw new InvalidOperationException("Baseline is already open.");
-            baseline=Open(3,IntPtr.Zero);
-            if(baseline==null) return null;
-            Validate(baseline.GetAccessControl(),false);
-            if(baseline.Length<2 || baseline.Length>65536) throw new IOException("Logging baseline size is invalid.");
-            byte[] bytes=new byte[(int)baseline.Length]; int offset=0;
-            while(offset<bytes.Length) { int n=baseline.Read(bytes,offset,bytes.Length-offset); if(n==0) throw new EndOfStreamException(); offset+=n; }
+        string ReadState(string file,ref FileStream stream) {
+            if(stream!=null) throw new InvalidOperationException("Baseline is already open.");
+            stream=Open(file,3,IntPtr.Zero);
+            if(stream==null) return null;
+            Validate(stream.GetAccessControl(),false);
+            if(stream.Length<2 || stream.Length>65536) throw new IOException("Logging baseline size is invalid.");
+            byte[] bytes=new byte[(int)stream.Length]; int offset=0;
+            while(offset<bytes.Length) { int n=stream.Read(bytes,offset,bytes.Length-offset); if(n==0) throw new EndOfStreamException(); offset+=n; }
             return new UTF8Encoding(false,true).GetString(bytes);
         }
-        public void SaveNew(string json) {
-            if(baseline!=null) throw new IOException("The original logging baseline must not be overwritten.");
+        void SaveState(string file,ref FileStream stream,string json) {
+            if(stream!=null) throw new IOException("The original logging baseline must not be overwritten.");
             byte[] data=new UTF8Encoding(false,true).GetBytes(json);
             if(data.Length<2 || data.Length>65536) throw new IOException("Logging baseline size is invalid.");
             byte[] security=Security(false).GetSecurityDescriptorBinaryForm();
@@ -306,55 +545,166 @@ namespace Dot1xLogging {
             try {
                 SA sa=new SA(); sa.Size=Marshal.SizeOf(typeof(SA)); sa.Descriptor=pinned.AddrOfPinnedObject();
                 raw=Marshal.AllocHGlobal(sa.Size); Marshal.StructureToPtr(sa,raw,false);
-                baseline=Open(1,raw);
-                Validate(baseline.GetAccessControl(),false);
-                baseline.Write(data,0,data.Length); baseline.Flush(true);
+                stream=Open(file,1,raw);
+                Validate(stream.GetAccessControl(),false);
+                stream.Write(data,0,data.Length); stream.Flush(true);
             } catch(Exception failure) {
-                // Open uses CREATE_NEW. Only this invocation's new file can be removed.
-                if(baseline!=null) {
-                    try { DeleteBaseline(); baseline.Dispose(); baseline=null; }
-                    catch(Exception cleanup) {
-                        throw new IOException("Initial baseline save and owned-file cleanup failed. No logging settings were changed; retain state.json for recovery.",new AggregateException(failure,cleanup));
-                    }
+                // CREATE_NEW limits cleanup to the file created by this call.
+                if(stream!=null) {
+                    try { DeleteState(ref stream); }
+                    catch(Exception cleanup) { throw new IOException("Initial baseline save and owned-file cleanup failed. Retain the recovery files.",new AggregateException(failure,cleanup)); }
                 }
                 throw;
             } finally { if(raw!=IntPtr.Zero) Marshal.FreeHGlobal(raw); pinned.Free(); }
         }
-        public void DeleteBaseline() {
-            if(baseline==null) throw new InvalidOperationException("No baseline is open.");
+        static void DeleteState(ref FileStream stream) {
+            if(stream==null) throw new InvalidOperationException("No baseline is open.");
             Disposition value=new Disposition(); value.Delete=true;
-            if(!SetFileInformationByHandle(baseline.SafeFileHandle,4,ref value,4)) throw new Win32Exception(Marshal.GetLastWin32Error(),"Logging baseline cleanup failed");
+            if(!SetFileInformationByHandle(stream.SafeFileHandle,4,ref value,4)) throw new Win32Exception(Marshal.GetLastWin32Error(),"Logging baseline cleanup failed");
+            stream.Dispose(); stream=null;
         }
+        public string Read() { return ReadState(path,ref baseline); }
+        public void SaveNew(string json) { SaveState(path,ref baseline,json); }
+        public void DeleteBaseline() { DeleteState(ref baseline); }
+        public string ReadTrace() { return ReadState(tracePath,ref traceIntent); }
+        public void SaveNewTrace(string json) { SaveState(tracePath,ref traceIntent,json); }
+        public void DeleteTrace() { DeleteState(ref traceIntent); }
         public void Dispose() {
             if(baseline!=null) { baseline.Dispose(); baseline=null; }
-            for(int i=directories.Count-1;i>=0;i--) directories[i].Dispose();
-            directories.Clear();
+            if(traceIntent!=null) { traceIntent.Dispose(); traceIntent=null; }
+            if(directoryLease!=null) directoryLease.Dispose();
         }
     }
 }
 '@ -ErrorAction Stop
 }
 
-function Invoke-LoggingSession {
-    param($Store, [string]$Machine, [string]$Caller, [bool]$Restoring, [bool]$Schannel)
-    $json = $Store.Read()
-    if ($null -eq $json) {
-        if ($Restoring) { Write-Host 'No saved logging baseline; nothing to restore.'; return }
-        $state = New-LoggingState $Machine $Caller $Schannel
-        $Store.SaveNew(($state | ConvertTo-Json -Depth 6 -Compress))
-    } else {
-        $state = ConvertFrom-Json -InputObject $json -ErrorAction Stop
-        Assert-LoggingState $state $Machine $Caller
-        if (-not $Restoring -and $Schannel -and $null -eq $state.Schannel) { throw 'The saved baseline excludes Schannel. Run -Restore, then -Enable -IncludeSchannel.' }
-        if (-not $Restoring) { Write-Host 'Using the original logging baseline and channel selection.' }
+function Assert-LoggingTraceState {
+    param($State, [string]$Machine, [string]$Caller)
+    Assert-LoggingProperties $State @('Version','Machine','Caller','SessionGuid','TracePath')
+    $id=[guid]::Empty
+    if (-not (Test-LoggingInteger $State.Version) -or $State.Version -ne 1 -or $State.Machine -cne $Machine -or $State.Caller -cne $Caller -or
+        $State.SessionGuid -isnot [string] -or -not [guid]::TryParseExact($State.SessionGuid,'D',[ref]$id) -or $id -eq [guid]::Empty -or $State.SessionGuid -cne $id.ToString('D')) { throw 'EapHost trace intent identity does not match.' }
+    $path=$State.TracePath
+    if ($path -isnot [string] -or $path.Length -gt 1024 -or $path -notmatch '^[A-Za-z]:\\' -or [IO.Path]::GetFullPath($path) -cne $path -or
+        [IO.Path]::GetFileName($path) -cne 'EapHost.etl' -or [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($path)) -cne ('EapHost-Trace-'+$id.ToString('N'))) { throw 'EapHost trace intent output path is invalid.' }
+}
+
+function New-LoggingTraceLease {
+    param([string]$Path, [string]$Caller, [bool]$Create)
+    New-Object Dot1xLoggingV2.DirectoryLease($Path,$Caller,$Create,$Create)
+}
+
+function Invoke-LoggingTraceNative {
+    param([ValidateSet('Query','Ensure','Stop')][string]$Action, $State)
+    $id=[guid]$State.SessionGuid
+    $name='Dot1xLogging-EapHost-'+$id.ToString('N')
+    switch ($Action) {
+        'Query' { [Dot1xLoggingV2.EapHostTrace]::Query($id,$name,$State.TracePath) }
+        'Ensure' { [Dot1xLoggingV2.EapHostTrace]::Ensure($id,$name,$State.TracePath) }
+        'Stop' { [Dot1xLoggingV2.EapHostTrace]::Stop($id,$name,$State.TracePath) }
     }
-    Invoke-LoggingChanges $state $Restoring
-    if ($Restoring) { $Store.DeleteBaseline(); Write-Host 'Original logging settings restored; baseline removed.' }
-    else { Write-Host 'Logging enabled. Reproduce the issue, collect evidence, then run -Restore.' }
+}
+
+function Invoke-LoggingTraceSession {
+    param($Store, [string]$Machine, [string]$Caller, [bool]$Restoring, [string]$OutputDirectory)
+    $json=$Store.ReadTrace()
+    $state=$null; $lease=$null
+    if ($null -ne $json) {
+        $state=ConvertFrom-Json -InputObject $json -ErrorAction Stop
+        Assert-LoggingTraceState $state $Machine $Caller
+    }
+    if ($Restoring) {
+        if ($null -eq $state) { return $false }
+        # Stop is independent of output-directory validation so recovery can
+        # release an owned session even if the output path needs attention.
+        $null=Invoke-LoggingTraceNative -Action Stop -State $state
+        try {
+            $lease=New-LoggingTraceLease -Path ([IO.Path]::GetDirectoryName($state.TracePath)) -Caller $Caller -Create $false
+            $exists=$lease.ValidateTraceFile('EapHost.etl',$true,$true)
+            if ($exists) { Write-Host ('EapHost trace saved: '+$state.TracePath) }
+            else { Write-Host ('EapHost trace ended; ETL file absent: '+$state.TracePath) }
+        } finally { if ($null -ne $lease) { $lease.Dispose() } }
+        return $true
+    }
+    if ($null -ne $state) {
+        $active=Invoke-LoggingTraceNative -Action Query -State $state
+        try {
+            $lease=New-LoggingTraceLease -Path ([IO.Path]::GetDirectoryName($state.TracePath)) -Caller $Caller -Create $false
+            $exists=$lease.ValidateTraceFile('EapHost.etl',$true,($null -eq $active))
+            if ($null -eq $active -and $exists) {
+                Write-Host ('EapHost trace retained: '+$state.TracePath)
+                # A finalized output gets a fresh intent instead of reuse.
+                $Store.DeleteTrace(); $state=$null
+            } else {
+                $null=Invoke-LoggingTraceNative -Action Ensure -State $state
+                Write-Host ('EapHost trace active: '+$state.TracePath)
+                return $true
+            }
+        } finally { if ($null -ne $lease) { $lease.Dispose(); $lease=$null } }
+    }
+    $root=Resolve-LoggingOutputDirectory $OutputDirectory
+    $id=[guid]::NewGuid()
+    $path=[IO.Path]::Combine($root,('EapHost-Trace-'+$id.ToString('N')))
+    $saved=$false
+    try {
+        $lease=New-LoggingTraceLease -Path $path -Caller $Caller -Create $true
+        $state=[pscustomobject]@{Version=1;Machine=$Machine;Caller=$Caller;SessionGuid=$id.ToString('D');TracePath=[IO.Path]::Combine($lease.Path,'EapHost.etl')}
+        Assert-LoggingTraceState $state $Machine $Caller
+        $Store.SaveNewTrace(($state|ConvertTo-Json -Depth 4 -Compress)); $saved=$true
+        $null=Invoke-LoggingTraceNative -Action Ensure -State $state
+        Write-Host ('EapHost trace active: '+$state.TracePath)
+        return $true
+    } finally {
+        if ($null -ne $lease) {
+            try { if (-not $saved) { $lease.DeleteEmptyDirectory() } }
+            finally { $lease.Dispose() }
+        }
+    }
+}
+
+function Invoke-LoggingSession {
+    param($Store, [string]$Machine, [string]$Caller, [bool]$Restoring, [bool]$Schannel, [string]$OutputDirectory, [bool]$EventsOnly=$false)
+    $failures=@(); $state=$null; $tracePresent=$false
+    if (-not $Restoring) {
+        $json=$Store.Read()
+        if ($null -eq $json) {
+            $state=New-LoggingState $Machine $Caller $Schannel
+            $Store.SaveNew(($state|ConvertTo-Json -Depth 6 -Compress))
+        } else {
+            $state=ConvertFrom-Json -InputObject $json -ErrorAction Stop
+            Assert-LoggingState $state $Machine $Caller
+            if ($Schannel -and $null -eq $state.Schannel) { throw 'The saved baseline excludes Schannel. Run -Restore, then -Enable -IncludeSchannel.' }
+            Write-Host 'Using the original logging baseline and channel selection.'
+        }
+        try { Invoke-LoggingChanges $state $false } catch { $failures+=$_.Exception.Message }
+        if (-not $EventsOnly) {
+            try { $null=Invoke-LoggingTraceSession $Store $Machine $Caller $false $OutputDirectory }
+            catch { $failures+=('EapHost trace: '+$_.Exception.Message) }
+        }
+    } else {
+        try {
+            $json=$Store.Read()
+            if ($null -ne $json) {
+                $state=ConvertFrom-Json -InputObject $json -ErrorAction Stop
+                Assert-LoggingState $state $Machine $Caller
+                Invoke-LoggingChanges $state $true
+            }
+        } catch { $failures+=$_.Exception.Message }
+        try { $tracePresent=Invoke-LoggingTraceSession $Store $Machine $Caller $true '' }
+        catch { $failures+=('EapHost trace: '+$_.Exception.Message) }
+    }
+    if ($failures.Count) { throw ("Logging changes incomplete. Recovery state retained; rerun -Restore.`n"+($failures -join "`n")) }
+    if ($Restoring) {
+        if ($tracePresent) { $Store.DeleteTrace() }
+        if ($null -ne $state) { $Store.DeleteBaseline() }
+        if ($tracePresent -or $null -ne $state) { Write-Host 'Original logging settings restored; recovery state removed.' }
+        else { Write-Host 'No saved logging baseline; nothing to restore.' }
+    } else { Write-Host 'Logging enabled. Reproduce the issue, collect evidence, then run -Restore.' }
 }
 
 function Start-LoggingHelper {
-    param([bool]$Enabling, [bool]$Restoring, [bool]$Schannel)
+    param([bool]$Enabling, [bool]$Restoring, [bool]$Schannel, [string]$OutputDirectory, [bool]$EventsOnly=$false)
     if ($Enabling -eq $Restoring -or ($Schannel -and -not $Enabling)) { throw 'Specify -Enable or -Restore. Use -IncludeSchannel only with -Enable.' }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     try {
@@ -376,14 +726,14 @@ function Start-LoggingHelper {
     try {
         # Create the private directory for both modes so an absent baseline is an
         # idempotent no-op without an unchecked Test-Path decision.
-        $store = New-Object Dot1xLogging.Store($directory,$caller,$true)
-        Invoke-LoggingSession $store $machine $caller $Restoring $Schannel
+        $store = New-Object Dot1xLoggingV2.Store($directory,$caller,$true)
+        Invoke-LoggingSession $store $machine $caller $Restoring $Schannel $OutputDirectory $EventsOnly
     } finally { if ($null -ne $store) { $store.Dispose() } }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version 2.0
-    try { Start-LoggingHelper ([bool]$Enable) ([bool]$Restore) ([bool]$IncludeSchannel) }
+    try { Start-LoggingHelper ([bool]$Enable) ([bool]$Restore) ([bool]$IncludeSchannel) $OutputDirectory ([bool]$EventsOnly) }
     catch { Write-Error -Message $_.Exception.Message -ErrorAction Continue; exit 1 }
 }
