@@ -21,6 +21,6 @@ The script does not observe the RADIUS/NPS decision, applied VLAN/role/ACL, NAC 
 
 ## Validation status
 
-The repair package adds regression tests and a Windows PowerShell 5.1 CI workflow. These additions are not a recorded test pass. See [test results](../tests/test-results.md) for previously recorded, hash-specific runs and [tests](../tests/README.md) for execution instructions.
+The full regression suite and a separate client logging enable/restore test passed on Windows PowerShell 5.1. See [test results](../tests/test-results.md) for source hashes, counts, and limits, and [tests](../tests/README.md) for execution instructions.
 
 Still needed: real wired/WLAN enterprise-profile collection, affected-user and alternate-administrator contexts, populated user/machine certificate stores, sanitized native event fixtures across relevant builds, and correlated client/RADIUS lab attempts. No synthetic result substitutes for those checks.

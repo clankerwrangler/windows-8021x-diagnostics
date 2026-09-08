@@ -1,8 +1,22 @@
 # Recorded test results
 
-The review fixes prepared against commit `39a7273bd4acf07df07ebbd7eff45c730696c5b1` have **not been executed on Windows**. The figures below are historical results for the listed source hashes, not validation of later changes. New CI runs record their tested commit, source SHA-256, UTC time, Windows version, and PowerShell runtime.
+Results apply to the listed source hashes, not later changes. CI runs record their tested commit, source SHA-256, UTC time, Windows version, and PowerShell runtime.
 
 Tests ran on Windows 11 IoT Enterprise LTSC (`10.0.26100.0`) with Windows PowerShell `5.1.26100.9278`. They use built-in assertions; no Pester or additional packages are required.
+
+## Client logging helper: 2026-09-08
+
+- Collector SHA-256: `31709e1787f57bbcb7fbf5ec04b80923e05f8f2e318d7290f39a25dbf57323d9` (unchanged).
+- Logging helper SHA-256: `1972cfe5757838c8b61b99e743c59ff777348d76d810e1b13c68e6eeda7f3557`.
+- Logging test SHA-256: `6a529f2c3a130ae832f1cc1b22e3816e90c0d6440ba2469134325191ee993d38`.
+
+The full Windows PowerShell 5.1 runner passed **223 cases across 11 suites**, with zero failures or timeouts. This includes 17 logging-helper cases covering channel selection, native exit codes, missing logs, original baselines, repeated enable, partial failures, exact restore, Schannel presence and DWORD values, and private state files. The runner was invoked without `-ScriptPath` to verify its default path resolution.
+
+A separate elevated live client test enabled all 22 installed allowlisted channels, set optional Schannel logging, repeated enable without replacing the original baseline, and restored every original enabled state, size, and Schannel value. A second restore was a no-op. Independent `Get-WinEvent` metadata checks verified the channel settings. Native sizes of `1052672` bytes were preserved exactly; they must not be rounded to 64 KiB boundaries. An isolated temporary event channel also passed the native size roundtrip and was unregistered afterward.
+
+No authentication was attempted, logs were not cleared, and no service, network connection, or computer was restarted. Schannel registry restoration was verified; reboot-dependent activation was not tested. The synthetic suite makes no live log-setting or registry changes.
+
+Use a short private scratch path. An initial run under a deeply nested path failed one existing output-location case; the same assertion passed with a short path. No assertion or collector behavior was changed to obtain the pass.
 
 ## Historical run: output destination changes
 

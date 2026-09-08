@@ -4,13 +4,13 @@ Run the dependency-free synthetic suite on Windows PowerShell 5.1. No Pester, pa
 
 ## Run the synthetic suite
 
-Provide an existing private directory that you own. Restrict access to the execution identity, SYSTEM, and Administrators. The suite creates and removes its own test files and processes; it does not run live endpoint collection.
+Provide an existing private directory with a short path that you own. Deeply nested test paths can exceed Windows PowerShell 5.1 path limits. Restrict access to the execution identity, SYSTEM, and Administrators. The suite creates and removes its own test files and processes; it does not run live endpoint collection.
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1 -ScratchPath "C:\YOUR_PRIVATE_TEST_DIRECTORY"
 ```
 
-The execution policy applies only to this process. The runner prints the source SHA-256, runtime versions, check results, and suite exit codes. Exit `0` means that all suites pass; exit `1` means that at least one suite fails.
+The execution policy applies only to this process. The runner prints the collector and logging-helper SHA-256 values, runtime versions, check results, and suite exit codes. Exit `0` means that all suites pass; exit `1` means that at least one suite fails.
 
 ## Coverage
 
@@ -23,6 +23,7 @@ Every test case must execute at least one built-in assertion; empty bodies fail.
 - Script parsing, help, read-only source guards, and CLI failures.
 - Reusable output destinations, unique private report directories, missing parent creation, literal/relative/trailing paths, saved-path visibility, and pipeline-only behavior.
 - Preservation of existing files and ACLs, rejection of reparse paths, exclusive private directories, and create-new report files.
+- Client logging allowlist, missing channels, durable original baselines, repeated enable, partial failures, exact restore, optional Schannel value/absence, and rejection of malformed or unsafe state. `Test-Logging.ps1` mocks all log-setting and registry changes; its real native-boundary regression runs only the read-only `wevtutil el` command.
 
 ## Continuous integration
 

@@ -28,6 +28,26 @@ Live collection includes rendered event messages by default. `-OmitEventMessages
 Get-Help .\Get-8021xDiagnostics.ps1 -Full
 ```
 
+## Prepare client logging, then restore
+
+In an elevated Windows PowerShell window, run (the execution policy applies only to this window):
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\Set-8021xLogging.ps1 -Enable
+# Reproduce the wired or Wi-Fi authentication problem now.
+.\Get-8021xDiagnostics.ps1
+.\Set-8021xLogging.ps1 -Restore
+```
+
+The helper enables installed client diagnostic channels and raises smaller logs to 100 MiB. It saves original settings before changes, skips missing channels, and never clears logs. The collector stays read-only.
+
+Optional: use `-Enable -IncludeSchannel` for extra Schannel event logging. This requires a reboot to apply; the helper never reboots or restarts services.
+
+Restore with the same elevated account, even after an error or interrupted run. Recovery state is `%ProgramData%\Dot1xLogging\state.json`; keep it until `-Restore` succeeds. Repeated `-Enable` preserves the first baseline.
+
+If the helper download is blocked: `Unblock-File .\Set-8021xLogging.ps1`. See [logging details and optional client tracing](docs/logging.md) for coverage, cleanup, and recovery.
+
 ## Reports
 
 - **`report.txt`**: relevant configuration, concise findings and next checks, grouped history, and missing evidence. Start here.
