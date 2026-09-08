@@ -429,7 +429,7 @@ namespace Dot1xLoggingV2 {
             TraceSnapshot found=QueryRaw(0,name);
             if(found!=null) {
                 if(found.SessionGuid!=id || !String.Equals(found.SessionName,name,StringComparison.Ordinal) || !String.Equals(found.TracePath,path,StringComparison.OrdinalIgnoreCase)) throw new IOException("Trace session identity or output differs from the saved intent.");
-                if(checkSettings && (found.LogFileMode!=CircularMode || found.MaximumFileSize!=LimitMiB)) throw new IOException("Trace session settings differ from the bounded capture settings.");
+                if(checkSettings && (found.LogFileMode!=CircularMode || found.MaximumFileSize!=LimitMiB)) throw new IOException("Trace session settings differ from the bounded capture settings: mode=0x"+found.LogFileMode.ToString("X8")+", maximumMiB="+found.MaximumFileSize+"; expected mode=0x"+CircularMode.ToString("X8")+", maximumMiB="+LimitMiB+".");
             }
             return found;
         }
