@@ -128,7 +128,7 @@ try {
     $first=[Dot1xLoggingV2.EapHostTrace]::Ensure($actual.Id,$actual.Name,$actual.Path)
     $again=[Dot1xLoggingV2.EapHostTrace]::Ensure($actual.Id,$actual.Name,$actual.Path)
     Assert-NativeTrace ($first.Handle -eq $again.Handle) 'Repeated EapHost enable replaced the session.'
-    Assert-NativeTrace ($again.MaximumFileSize -eq 256 -and $again.LogFileMode -eq 0x10000002) 'EapHost trace settings differ from the fixed capture bounds.'
+    Assert-NativeTrace ($again.MaximumFileSize -eq 256 -and $again.LogFileMode -eq 0x10400002) 'EapHost trace settings differ from the fixed capture bounds.'
     [Dot1xLoggingV2.EapHostTrace]::Stop($actual.Id,$actual.Name,$actual.Path)
     Assert-NativeTrace ($null -eq [Dot1xLoggingV2.EapHostTrace]::Query($actual.Id,$actual.Name,$actual.Path)) 'EapHost stop did not establish absence.'
     Assert-NativeTrace ($actual.Lease.ValidateTraceFile('EapHost.etl',$false,$true)) 'The finalized EapHost ETL is missing or unsafe.'

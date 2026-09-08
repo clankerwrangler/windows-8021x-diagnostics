@@ -375,7 +375,8 @@ namespace Dot1xLoggingV2 {
     }
     public static class EapHostTrace {
         static readonly Guid Provider=new Guid("5f31090b-d990-4e91-b16d-46121d0255aa");
-        const uint CircularMode=0x10000002,LimitMiB=256,NotFound=4201,GuidNotFound=4200;
+        // Explicit circular, shared-buffer, and stop-on-hybrid-shutdown modes.
+        const uint CircularMode=0x10400002,LimitMiB=256,NotFound=4201,GuidNotFound=4200;
         const int StringChars=1025,ProviderInfoLimit=65536;
         [DllImport("advapi32.dll",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern uint StartTraceW(out ulong handle,string name,IntPtr properties);
         [DllImport("advapi32.dll",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern uint ControlTraceW(ulong handle,string name,IntPtr properties,uint code);
