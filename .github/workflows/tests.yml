@@ -68,9 +68,11 @@ jobs:
           ('CI commit=' + $env:GITHUB_SHA + ' utc=' + [datetime]::UtcNow.ToString('o')) | Set-Content -LiteralPath $resultPath
           $exitCode = 1
           try {
+            $ErrorActionPreference = 'Continue'
             & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-EapHostTraceNative.ps1 -HelperPath (Join-Path $PWD 'Set-8021xLogging.ps1') -ScratchPath $scratch 2>&1 | Tee-Object -FilePath $resultPath -Append
             $exitCode = $LASTEXITCODE
           } finally {
+            $ErrorActionPreference = 'Stop'
             if ($exitCode -eq 0) { Remove-Item -LiteralPath $scratch -Recurse -Force }
           }
           exit $exitCode

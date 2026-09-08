@@ -23,11 +23,16 @@ Every test case must execute at least one built-in assertion; empty bodies fail.
 - Script parsing, help, read-only source guards, and CLI failures.
 - Reusable output destinations, unique private report directories, missing parent creation, literal/relative/trailing paths, saved-path visibility, and pipeline-only behavior.
 - Preservation of existing files and ACLs, rejection of reparse paths, exclusive private directories, and create-new report files.
-- Client logging allowlist, missing channels, durable original baselines, repeated enable, partial failures, exact restore, optional Schannel value/absence, and rejection of malformed or unsafe state. `Test-Logging.ps1` mocks all log-setting and registry changes; its real native-boundary regression runs only the read-only `wevtutil el` command.
+- Client logging allowlist, missing channels, durable original baselines, repeated enable, partial failures, exact restore, optional Schannel value/absence, and rejection of malformed or unsafe state. `Test-Logging.ps1` mocks event-log, registry, and trace lifecycle mutations. Its filesystem cases use private scratch fixtures, and its native-command boundary runs the read-only `wevtutil el` command.
 
 ## Continuous integration
 
-`.github/workflows/tests.yml` runs the full synthetic suite in Windows PowerShell 5.1 (`shell: powershell`) on a Windows runner. It uses read-only repository permissions, creates a private scratch directory, records the tested commit and runtime, and uploads only synthetic test output. It does not run live endpoint collection.
+`.github/workflows/tests.yml` runs two jobs on disposable Windows runners with Windows PowerShell 5.1:
+
+- The full synthetic suite covers the collector, reports, and logging-helper orchestration.
+- `Test-EapHostTraceNative.ps1` exercises real private ETW sessions: registered and pre-enabled synthetic providers, foreign-session conflicts, repeated activation, recovery from changed settings, and the fixed EapHost provider. It stops its owned sessions and validates the finalized ETL files.
+
+Both jobs use private scratch directories, record the tested commit and runtime, and upload test receipts. The native job uses synthetic events and session lifecycle checks; physical 802.1X authentication remains a separate integration test.
 
 ## Optional native checks
 

@@ -130,6 +130,14 @@ try {
     Assert-NativeTrace ($actual.Lease.ValidateTraceFile('EapHost.etl',$false,$true)) 'The finalized EapHost ETL is missing or unsafe.'
     Assert-NativeTrace ((New-Object IO.FileInfo($actual.Path)).Length -gt 0) 'The finalized EapHost ETL is empty.'
     Write-Output 'PASS fixed EapHost provider ensure, repeat, query, stop, and finalized ETL'
+} catch {
+    Write-Output ('FAIL native lifecycle: '+$_.Exception.ToString())
+    $failure=$_.Exception
+    while ($null -ne $failure) {
+        if ($failure -is [ComponentModel.Win32Exception]) { Write-Output ('NATIVE_CODE='+$failure.NativeErrorCode+' '+$failure.Message) }
+        $failure=$failure.InnerException
+    }
+    throw
 } finally {
     foreach ($item in $sessions) {
         try { [Dot1xLoggingV2.EapHostTrace]::Stop($item.Id,$item.Name,$item.Path) }

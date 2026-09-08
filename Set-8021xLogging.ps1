@@ -1,25 +1,29 @@
 <#
 .SYNOPSIS
-Temporarily enables Windows client 802.1X diagnostic event logs, then restores their settings.
+Prepares Windows client 802.1X event logs and EapHost tracing, then restores logging settings.
 .DESCRIPTION
-Run elevated in Windows PowerShell 5.1. Saves the original enabled states and log sizes
-in a private machine- and caller-bound baseline under ProgramData\Dot1xLogging.
-The collector remains read-only. This helper never clears logs, changes authentication
-or TLS policy, reboots, or restarts services. Dot-sourcing imports functions only.
+Run elevated in Windows PowerShell 5.1. Original channel settings and owned trace intent
+are saved separately under ProgramData\Dot1xLogging, bound to the machine and caller.
+The default capture is a 256 MiB circular EapHost trace. Restore finalizes the ETL in
+its saved report location and restores the original logging settings.
 .PARAMETER Enable
-Enable installed allowlisted client channels and raise sizes below 100 MiB to 100 MiB.
-Repeated Enable uses the original baseline, not the currently enabled settings.
+Enable installed allowlisted client channels, raise sizes below 100 MiB to 100 MiB,
+and start EapHost tracing. Repeated Enable reuses the original channel baseline and
+an active owned trace. An ended capture is retained before a fresh capture starts.
 .PARAMETER Restore
-Restore original enabled states, sizes, and optional Schannel value. On any failure,
-keep the baseline and rerun Restore with the same elevated account on the same machine.
+Stop the owned EapHost trace, finalize its ETL, and restore original channel settings
+and optional Schannel value. Errors retain recovery state for another Restore attempt
+with the same elevated account on the same machine.
 .PARAMETER OutputDirectory
-With Enable, place a new private EapHost trace folder under this report parent.
-The default is Dot1x-Report in the current directory. Restore uses the saved path.
+With Enable, select the report parent for a new private EapHost-Trace-<GUID> folder
+containing EapHost.etl. The default is Dot1x-Report in the current PowerShell directory.
+Restore uses the saved absolute path.
 .PARAMETER EventsOnly
-With Enable, prepare event channels and optional Schannel logging only.
+With Enable, use event-channel preparation as a stand-alone mode. IncludeSchannel
+also applies in this mode. Restore still finalizes any previously saved trace.
 .PARAMETER IncludeSchannel
 With Enable, also save the Schannel EventLogging DWORD (or its absence) and set it to 7.
-A reboot is required to apply Schannel changes, including restoration. No reboot is run.
+A reboot is required to apply Schannel changes, including restoration.
 .EXAMPLE
 .\Set-8021xLogging.ps1 -Enable
 .EXAMPLE
@@ -199,9 +203,9 @@ function Invoke-LoggingChanges {
             if (-not $Restoring) { $setting = [pscustomobject]@{ Present=$true; Value=7L } }
             Set-LoggingSchannel $setting
         } catch { $failures += ('Schannel: ' + $_.Exception.Message) }
-        Write-Host 'Schannel EventLogging: reboot required to apply changes, including restoration. No reboot was started.'
+        Write-Host 'Schannel EventLogging: reboot required to apply changes, including restoration.'
     }
-    Write-Host ("Client channels configured: $done/$($State.Channels.Count). Logs were not cleared.")
+    Write-Host ("Client channels configured: $done/$($State.Channels.Count).")
     if ($failures.Count) { throw ("Logging changes incomplete. Baseline retained; rerun -Restore to recover.`n" + ($failures -join "`n")) }
 }
 

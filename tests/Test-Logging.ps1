@@ -300,6 +300,157 @@ Test-Case 'enumeration native errors are not treated as missing optional logs' {
     Assert-True ($message.Length -lt 1200 -and $message -match '\[truncated\]') 'Native failure text is unbounded.'
 }
 
+Test-Case 'default enable saves trace intent before ETW and reuses the active capture' {
+    Reset-TestLogging; Invoke-TestLogging
+    $baseline=$script:store.Json; $trace=$script:store.TraceJson
+    $saved=$trace|ConvertFrom-Json
+    Assert-LoggingTraceState $saved 'fixture-machine' 'fixture-caller'
+    Assert-Equal $script:store.TraceSaves 1 'Default enable did not save one trace intent.'
+    Assert-Equal @($script:traceCalls|Where-Object {$_ -eq 'Ensure'}).Count 1 'Default enable did not start capture.'
+    Invoke-TestLogging -OutputDirectory (Join-Path $ScratchPath 'other-output')
+    Assert-Equal $script:store.Json $baseline 'Trace reuse overwrote the original channel baseline.'
+    Assert-Equal $script:store.TraceJson $trace 'Active capture was replaced by a new intent.'
+    Assert-Equal $script:traceActive.Count 1 'Repeated enable created another active capture.'
+    Assert-Equal $script:store.TraceSaves 1 'Repeated enable overwrote the trace intent.'
+}
+Test-Case 'events-only preserves the original path and later default enable adds trace to v1 state' {
+    Reset-TestLogging; Invoke-TestLogging -EventsOnly $true
+    $baseline=$script:store.Json
+    Assert-Equal ($baseline|ConvertFrom-Json).Version 1 'The original baseline format changed.'
+    Assert-Equal $script:traceCalls.Count 0 'Events-only touched ETW.'
+    Assert-True ($null -eq $script:store.TraceJson) 'Events-only created trace intent.'
+    Invoke-TestLogging
+    Assert-Equal $script:store.Json $baseline 'Adding trace rewrote an active v1 baseline.'
+    Assert-Equal $script:store.TraceSaves 1 'Trace was not added to an active v1 baseline.'
+    Reset-TestLogging; Invoke-TestLogging -EventsOnly $true; Invoke-TestLogging -Restoring $true
+    Assert-Equal $script:traceCalls.Count 0 'Legacy baseline restore touched ETW.'
+    Assert-Equal $script:store.Deletes 1 'Legacy baseline restoration changed.'
+}
+Test-Case 'trace intent save failure preserves channel enable and prevents ETW start' {
+    Reset-TestLogging; $script:store.FailTraceSave=$true
+    Assert-Throws { Invoke-TestLogging } 'trace intent disk failure'
+    Assert-Equal @(Get-TestMutations).Count 18 'Trace save failure blocked original channel preparation.'
+    Assert-Equal $script:traceCalls.Count 0 'ETW started before durable trace intent.'
+    Assert-True ($null -ne $script:store.Json) 'Original channel recovery state was lost.'
+    Assert-True ($null -eq $script:store.TraceJson) 'Failed trace save published an intent.'
+    Invoke-TestLogging -Restoring $true
+    Assert-Equal $script:store.Deletes 1 'Channel restoration depended on trace creation.'
+}
+Test-Case 'unknown trace query preserves intent and reports failure without another start' {
+    Reset-TestLogging; Invoke-TestLogging
+    $trace=$script:store.TraceJson
+    $script:traceFailureAction='Query'
+    Assert-Throws { Invoke-TestLogging } 'trace Query failure'
+    Assert-Equal $script:store.TraceJson $trace 'Unknown query deleted the saved trace identity.'
+    Assert-Equal @($script:traceCalls|Where-Object {$_ -eq 'Ensure'}).Count 1 'Unknown query was treated as absence.'
+    Assert-Equal @(Get-TestMutations).Count 36 'Unknown trace query blocked original channel preparation.'
+}
+Test-Case 'interrupted provider enable remains recoverable from saved intent' {
+    Reset-TestLogging; $script:traceFailAfterStart=$true
+    Assert-Throws { Invoke-TestLogging } 'provider enable failure after session start'
+    Assert-Equal $script:traceActive.Count 1 'Fixture did not model a started session.'
+    Assert-True ($null -ne $script:store.TraceJson) 'Interrupted start lost the trace intent.'
+    Invoke-TestLogging -Restoring $true
+    Assert-Equal $script:traceActive.Count 0 'Restore missed the session started before provider failure.'
+    Assert-Equal $script:store.TraceDeletes 1 'Recovered trace intent was not removed.'
+    Assert-Equal $script:traceFiles.Count 1 'Restore deleted the captured file.'
+}
+Test-Case 'trace stop errors retain both recovery records while original settings restore' {
+    Reset-TestLogging; Invoke-TestLogging
+    $baseline=$script:store.Json; $trace=$script:store.TraceJson
+    $script:traceFailureAction='Stop'
+    Assert-Throws { Invoke-TestLogging -Restoring $true } 'trace Stop failure'
+    Assert-Equal @(Get-TestMutations).Count 36 'Trace stop failure prevented channel restoration attempts.'
+    Assert-Equal $script:store.Json $baseline 'Trace stop failure lost the channel baseline.'
+    Assert-Equal $script:store.TraceJson $trace 'Trace stop failure lost trace recovery identity.'
+    $script:traceFailureAction=''; Invoke-TestLogging -Restoring $true
+    Assert-Equal $script:traceActive.Count 0 'Stop retry did not recover the session.'
+    Assert-True ($null -eq $script:store.Json -and $null -eq $script:store.TraceJson) 'Completed recovery left state behind.'
+    Assert-Equal $script:traceFiles.Count 1 'Stop retry deleted the captured file.'
+}
+Test-Case 'channel restore errors still stop owned trace and preserve retry state' {
+    Reset-TestLogging; Invoke-TestLogging
+    $script:nativeFailures['sl:Microsoft-Windows-CAPI2/Operational']=5
+    Assert-Throws { Invoke-TestLogging -Restoring $true } 'exit=5'
+    Assert-Equal $script:traceActive.Count 0 'Channel restore failure prevented owned trace stop.'
+    Assert-True ($null -ne $script:store.TraceJson -and $null -ne $script:store.Json) 'Partial recovery lost required state.'
+    $script:nativeFailures.Clear(); Invoke-TestLogging -Restoring $true
+    Assert-Equal @($script:traceCalls|Where-Object {$_ -eq 'Stop'}).Count 2 'Already-stopped trace recovery was not idempotent.'
+    Assert-Equal $script:store.TraceDeletes 1 'Completed recovery did not remove trace intent.'
+}
+Test-Case 'output validation errors cannot prevent owned trace stop' {
+    Reset-TestLogging; Invoke-TestLogging; $script:traceFileFailure=$true
+    Assert-Throws { Invoke-TestLogging -Restoring $true } 'trace output validation failure'
+    Assert-Equal $script:traceActive.Count 0 'Unsafe output path prevented owned session recovery.'
+    Assert-True ($null -ne $script:store.TraceJson) 'Output validation failure discarded recovery context.'
+    Assert-Equal $script:traceFiles.Count 1 'Output validation failure removed captured evidence.'
+    $script:traceFileFailure=$false; Invoke-TestLogging -Restoring $true
+    Assert-Equal $script:store.TraceDeletes 1 'Output validation retry did not finish recovery.'
+}
+Test-Case 'malformed channel state leaves independently valid trace recovery available' {
+    Reset-TestLogging; Invoke-TestLogging
+    $baseline=$script:store.Json; $script:store.Json='{'
+    $before=@(Get-TestMutations).Count
+    Assert-Throws { Invoke-TestLogging -Restoring $true }
+    Assert-Equal @(Get-TestMutations).Count $before 'Malformed channel state authorized a settings change.'
+    Assert-Equal $script:traceActive.Count 0 'Malformed channel state blocked valid trace recovery.'
+    Assert-True ($null -ne $script:store.TraceJson) 'Incomplete combined recovery lost trace context.'
+    $script:store.Json=$baseline; Invoke-TestLogging -Restoring $true
+    Assert-Equal $script:store.Deletes 1 'Validated channel recovery could not resume.'
+}
+Test-Case 'malformed or foreign trace intent cannot authorize ETW or deletion' {
+    Reset-TestLogging; Invoke-TestLogging
+    $valid=$script:store.TraceJson
+    $invalid=@('{','{}',$valid.Replace('fixture-machine','other-machine'),$valid.Replace('fixture-caller','other-caller'),
+        $valid.Replace('"Version":1','"Version":2'),$valid.Replace('"Version":1','"Command":"anything","Version":1'),
+        $valid.Replace('EapHost.etl','other.etl'),$valid.Replace('EapHost-Trace-','other-'))
+    foreach ($json in $invalid) {
+        $script:store.TraceJson=$json; $script:traceCalls.Clear()
+        Assert-Throws { Invoke-TestLogging -Restoring $true }
+        Assert-Equal $script:traceCalls.Count 0 'Invalid intent authorized an ETW operation.'
+        Assert-Equal $script:store.TraceDeletes 0 'Invalid trace intent was deleted.'
+        Assert-True ($null -ne $script:store.Json) 'Invalid trace intent discarded channel recovery state.'
+    }
+}
+Test-Case 'orphan trace intent restores even when the channel baseline is absent' {
+    Reset-TestLogging; Invoke-TestLogging
+    $script:store.Json=$null; $before=@(Get-TestMutations).Count
+    Invoke-TestLogging -Restoring $true
+    Assert-Equal $script:traceActive.Count 0 'Absent channel baseline hid owned trace recovery.'
+    Assert-Equal @(Get-TestMutations).Count $before 'Absent channel baseline invented settings to restore.'
+    Assert-Equal $script:store.TraceDeletes 1 'Orphan trace intent was not finalized.'
+    Assert-Equal $script:traceFiles.Count 1 'Orphan recovery deleted the ETL.'
+}
+Test-Case 'ended captures are retained and a fresh intent uses the requested report parent' {
+    Reset-TestLogging; Invoke-TestLogging
+    $baseline=$script:store.Json; $prior=$script:store.TraceJson|ConvertFrom-Json
+    $script:traceActive.Clear()
+    $output=Join-Path $ScratchPath 'next-report-parent'
+    Invoke-TestLogging -OutputDirectory $output
+    $next=$script:store.TraceJson|ConvertFrom-Json
+    Assert-Equal $script:store.Json $baseline 'Fresh trace changed the channel baseline.'
+    Assert-True ($next.SessionGuid -ne $prior.SessionGuid -and $next.TracePath -ne $prior.TracePath) 'Ended capture was reopened for overwrite.'
+    Assert-True $script:traceFiles.ContainsKey($prior.TracePath) 'Ended capture was deleted.'
+    Assert-Equal ([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($next.TracePath))) ([IO.Path]::GetFullPath($output)) 'Fresh capture ignored the selected report parent.'
+    Assert-Equal $script:store.TraceSaves 2 'Fresh capture did not save a new intent.'
+    Assert-Equal $script:store.TraceDeletes 1 'Ended capture intent was not finalized.'
+}
+Test-Case 'ended capture cleanup failure cannot replace its saved intent' {
+    Reset-TestLogging; Invoke-TestLogging
+    $trace=$script:store.TraceJson; $script:traceActive.Clear(); $script:store.FailTraceDelete=$true
+    Assert-Throws { Invoke-TestLogging } 'trace intent cleanup failure'
+    Assert-Equal $script:store.TraceJson $trace 'Failed intent cleanup replaced trace identity.'
+    Assert-Equal $script:store.TraceSaves 1 'Failed intent cleanup created another capture.'
+    Assert-Equal $script:traceFiles.Count 1 'Failed intent cleanup removed the prior ETL.'
+}
+Test-Case 'trace output and events-only switches belong only to Enable' {
+    $command=Get-Command $helperPath
+    foreach ($name in @('OutputDirectory','EventsOnly')) {
+        Assert-True $command.Parameters.ContainsKey($name) 'An Enable option is missing.'
+        Assert-True ($command.Parameters[$name].ParameterSets.ContainsKey('Enable') -and -not $command.Parameters[$name].ParameterSets.ContainsKey('Restore')) 'An Enable option is accepted by Restore.'
+    }
+}
+
 Test-Case 'real native boundary returns the actual wevtutil exit code without changing logging' {
     $global:LASTEXITCODE = 77
     $result = & $script:realLoggingNative @('el')
@@ -313,6 +464,13 @@ $caseRoot = Join-Path $ScratchPath ('logging-fixtures-' + [guid]::NewGuid().ToSt
 $null = [IO.Directory]::CreateDirectory($caseRoot)
 $caller = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 try {
+    Test-Case 'updated initializer coexists with an older Store CLR type in the same shell' {
+        Add-Type -TypeDefinition 'namespace Dot1xLogging { public sealed class Store { public static int OldMarker=1; } }'
+        Initialize-LoggingStore
+        Assert-Equal ([Dot1xLogging.Store]::OldMarker) 1 'The older CLR fixture was not loaded.'
+        Assert-True ($null -ne [Dot1xLoggingV2.Store].GetMethod('ReadTrace')) 'The updated initializer reused the old Store type.'
+        Assert-True ($null -ne ('Dot1xLoggingV2.DirectoryLease' -as [type])) 'The updated directory lease was not loaded.'
+    }
     Test-Case 'state store compiles and preserves private durable baseline across reopening and retries' {
         Initialize-LoggingStore
         $path = Join-Path $caseRoot 'private'
@@ -330,6 +488,165 @@ try {
         try { Assert-Equal $lease.Read() '{"fixture":1}' 'Baseline did not survive reopening.'; $lease.DeleteBaseline() }
         finally { $lease.Dispose() }
         Assert-True (-not [IO.File]::Exists((Join-Path $path 'state.json'))) 'Completed restore left the baseline.'
+    }
+    Test-Case 'state store keeps channel and trace intents independent across reopening' {
+        $path=Join-Path $caseRoot 'two state slots'
+        $lease=New-Object Dot1xLoggingV2.Store($path,$caller,$true)
+        try { $lease.SaveNew('{"original":1}'); $lease.SaveNewTrace('{"trace":1}') } finally { $lease.Dispose() }
+        $lease=New-Object Dot1xLoggingV2.Store($path,$caller,$true)
+        try {
+            Assert-Equal $lease.Read() '{"original":1}' 'Trace intent changed the original baseline bytes.'
+            Assert-Equal $lease.ReadTrace() '{"trace":1}' 'Trace intent did not survive reopening.'
+            Assert-Throws { $lease.SaveNewTrace('{"trace":2}') } 'must not be overwritten'
+            $lease.DeleteTrace(); $lease.SaveNewTrace('{"trace":2}')
+            Assert-Throws { $other=New-Object Dot1xLoggingV2.Store($path,$caller,$true); try { $other.ReadTrace() } finally { $other.Dispose() } } 'open failed'
+            $lease.DeleteTrace()
+        } finally { $lease.Dispose() }
+        Assert-Equal ([IO.File]::ReadAllText((Join-Path $path 'state.json'))) '{"original":1}' 'Trace replacement changed channel state.'
+        Assert-True (-not [IO.File]::Exists((Join-Path $path 'eaphost-trace.json'))) 'Trace intent deletion did not close its owned file.'
+    }
+    Test-Case 'trace intent uses the same protected ACL and single-link validation as channel state' {
+        $path=Join-Path $caseRoot 'unsafe trace intent'
+        $lease=New-Object Dot1xLoggingV2.Store($path,$caller,$true)
+        try { $lease.SaveNewTrace('{"trace":1}') } finally { $lease.Dispose() }
+        $file=Join-Path $path 'eaphost-trace.json'
+        $acl=Get-Acl -LiteralPath $file; $original=$acl.Sddl
+        $acl.SetAccessRuleProtection($false,$true); Set-Acl -LiteralPath $file -AclObject $acl
+        $lease=New-Object Dot1xLoggingV2.Store($path,$caller,$true)
+        try { Assert-Throws { $lease.ReadTrace() } 'unsafe' } finally { $lease.Dispose() }
+        $acl.SetSecurityDescriptorSddlForm($original); Set-Acl -LiteralPath $file -AclObject $acl
+        $null=New-Item -Path (Join-Path $caseRoot 'trace state alias.json') -ItemType HardLink -Target $file -ErrorAction Stop
+        $lease=New-Object Dot1xLoggingV2.Store($path,$caller,$true)
+        try { Assert-Throws { $lease.ReadTrace() } 'hard link' } finally { $lease.Dispose() }
+        Assert-Equal ([IO.File]::ReadAllText($file)) '{"trace":1}' 'Invalid trace intent was altered.'
+    }
+    Test-Case 'trace output resolves the PowerShell location and literal FileSystem paths' {
+        Push-Location -LiteralPath $caseRoot
+        try {
+            Assert-Equal (Resolve-LoggingOutputDirectory) (Join-Path $caseRoot 'Dot1x-Report') 'Default trace output ignored the PowerShell location.'
+            Assert-Equal (Resolve-LoggingOutputDirectory '.\output [literal]') (Join-Path $caseRoot 'output [literal]') 'Literal relative output path changed.'
+            Assert-Throws { Resolve-LoggingOutputDirectory 'Env:TEMP' } 'FileSystem provider'
+        } finally { Pop-Location }
+    }
+    Test-Case 'trace directory creates private ancestors and preserves an existing parent ACL' {
+        Initialize-LoggingStore
+        $parent = Join-Path $caseRoot 'trace existing parent'
+        $null = [IO.Directory]::CreateDirectory($parent)
+        $before = (Get-Acl -LiteralPath $parent).Sddl
+        $newParent = Join-Path $parent 'new private parent'
+        $path = Join-Path $newParent 'EapHost-Trace-11111111111111111111111111111111'
+        $lease = New-Object Dot1xLoggingV2.DirectoryLease($path,$caller,$true,$true)
+        try {
+            Assert-Equal $lease.Path $path 'Trace lease did not retain the canonical path.'
+            Assert-Equal (Get-Acl -LiteralPath $parent).Sddl $before 'An existing output parent ACL changed.'
+            foreach ($directory in @($newParent,$path)) {
+                $acl = Get-Acl -LiteralPath $directory
+                Assert-True $acl.AreAccessRulesProtected 'New trace directory inherits unrelated access.'
+                Assert-Equal $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value $caller 'New trace directory has a foreign owner.'
+                $allowed = @($caller,'S-1-5-18','S-1-5-32-544') | Select-Object -Unique
+                $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+                Assert-Equal $rules.Count $allowed.Count 'New trace directory has unexpected access entries.'
+                foreach ($rule in $rules) {
+                    Assert-True ($allowed -contains $rule.IdentityReference.Value) 'Trace directory grants access to another principal.'
+                    Assert-Equal $rule.FileSystemRights ([Security.AccessControl.FileSystemRights]::FullControl) 'Trace directory has unexpected rights.'
+                    Assert-Equal $rule.AccessControlType ([Security.AccessControl.AccessControlType]::Allow) 'Trace directory has an unexpected access type.'
+                }
+            }
+            Assert-True (-not $lease.ValidateTraceFile('EapHost.etl',$true)) 'A fresh trace lease contains an ETL.'
+            Assert-Throws { $lease.ValidateTraceFile('EapHost.etl',$false) } 'open failed'
+            Assert-Throws { $other = New-Object Dot1xLoggingV2.DirectoryLease($path,$caller,$true,$true); $other.Dispose() } 'creation failed'
+            [IO.File]::WriteAllText((Join-Path $path 'EapHost.etl'),'synthetic ETL bytes')
+            Assert-True $lease.ValidateTraceFile('EapHost.etl',$false) 'Ordinary inherited-ACL ETL was rejected.'
+            Assert-Throws { $lease.DeleteEmptyDirectory() } 'cleanup failed'
+            Assert-Equal ([IO.File]::ReadAllText((Join-Path $path 'EapHost.etl'))) 'synthetic ETL bytes' 'Populated trace output was changed during cleanup.'
+        } finally { $lease.Dispose() }
+        $lease = New-Object Dot1xLoggingV2.DirectoryLease($path,$caller,$false,$false)
+        try {
+            Assert-True $lease.ValidateTraceFile('EapHost.etl',$false) 'Completed ETL did not survive reopening.'
+            Assert-Throws { $lease.DeleteEmptyDirectory() } 'Only this lease'
+        } finally { $lease.Dispose() }
+    }
+    Test-Case 'trace resume rejects missing or unsafe output without repairing it' {
+        $missing = Join-Path $caseRoot 'missing trace'
+        Assert-Throws { $lease = New-Object Dot1xLoggingV2.DirectoryLease($missing,$caller,$false,$false); $lease.Dispose() } 'open failed'
+        Assert-True (-not [IO.Directory]::Exists($missing)) 'Resume created missing output.'
+        $unsafe = Join-Path $caseRoot 'unsafe trace'
+        $null = [IO.Directory]::CreateDirectory($unsafe)
+        $before = (Get-Acl -LiteralPath $unsafe).Sddl
+        Assert-Throws { $lease = New-Object Dot1xLoggingV2.DirectoryLease($unsafe,$caller,$false,$false); $lease.Dispose() } 'unsafe'
+        Assert-Equal (Get-Acl -LiteralPath $unsafe).Sddl $before 'Resume replaced an unsafe output ACL.'
+    }
+    Test-Case 'trace output rejects junction ancestors and hard-linked or reparse ETL files' {
+        $target = Join-Path $caseRoot 'trace junction target'
+        $null = [IO.Directory]::CreateDirectory($target)
+        $junction = Join-Path $caseRoot 'trace junction'
+        $null = New-Item -Path $junction -ItemType Junction -Target $target -ErrorAction Stop
+        try {
+            Assert-Throws { $lease = New-Object Dot1xLoggingV2.DirectoryLease((Join-Path $junction 'new trace'),$caller,$true,$true); $lease.Dispose() } 'reparse point'
+            Assert-Equal @([IO.Directory]::EnumerateFileSystemEntries($target)).Count 0 'Trace creation wrote through a junction.'
+        } finally { [IO.Directory]::Delete($junction) }
+        $path = Join-Path $caseRoot 'linked trace files'
+        $lease = New-Object Dot1xLoggingV2.DirectoryLease($path,$caller,$true,$true)
+        try {
+            $etl = Join-Path $path 'EapHost.etl'
+            [IO.File]::WriteAllText($etl,'keep linked bytes')
+            $alias = Join-Path $caseRoot 'etl alias'
+            $null = New-Item -Path $alias -ItemType HardLink -Target $etl -ErrorAction Stop
+            Assert-Throws { $lease.ValidateTraceFile('EapHost.etl',$false) } 'hard link'
+            Assert-Equal ([IO.File]::ReadAllText($alias)) 'keep linked bytes' 'Hard-linked ETL was modified.'
+            $reparse = Join-Path $path 'reparse.etl'
+            $null = New-Item -Path $reparse -ItemType Junction -Target $target -ErrorAction Stop
+            try { Assert-Throws { $lease.ValidateTraceFile('reparse.etl',$false) } 'reparse point|open failed' }
+            finally { [IO.Directory]::Delete($reparse) }
+            Assert-Throws { $lease.ValidateTraceFile('..\etl alias',$false) } 'one local filename'
+        } finally { $lease.Dispose() }
+    }
+    Test-Case 'trace file validation accepts explicit private ACLs and rejects foreign or incomplete access' {
+        $path = Join-Path $caseRoot 'trace file ACLs'
+        $lease = New-Object Dot1xLoggingV2.DirectoryLease($path,$caller,$true,$true)
+        try {
+            $etl = Join-Path $path 'EapHost.etl'
+            [IO.File]::WriteAllText($etl,'private synthetic bytes')
+            $original = (Get-Acl -LiteralPath $etl).Sddl
+            $acl = Get-Acl -LiteralPath $etl
+            $acl.SetAccessRuleProtection($true,$true)
+            Set-Acl -LiteralPath $etl -AclObject $acl
+            Assert-True $lease.ValidateTraceFile('EapHost.etl',$false,$true) 'Equivalent explicit private ACL was rejected.'
+            $foreign = New-Object Security.Principal.SecurityIdentifier('S-1-1-0')
+            $rule = New-Object Security.AccessControl.FileSystemAccessRule($foreign,[Security.AccessControl.FileSystemRights]::Read,[Security.AccessControl.AccessControlType]::Allow)
+            $acl.AddAccessRule($rule); Set-Acl -LiteralPath $etl -AclObject $acl
+            Assert-Throws { $lease.ValidateTraceFile('EapHost.etl',$true) } 'ACL is unsafe'
+            $acl.RemoveAccessRuleSpecific($rule)
+            $acl.PurgeAccessRules((New-Object Security.Principal.SecurityIdentifier('S-1-5-18')))
+            Set-Acl -LiteralPath $etl -AclObject $acl
+            Assert-Throws { $lease.ValidateTraceFile('EapHost.etl',$true) } 'ACL is incomplete'
+            $acl.SetSecurityDescriptorSddlForm($original); Set-Acl -LiteralPath $etl -AclObject $acl
+            Assert-True $lease.ValidateTraceFile('EapHost.etl',$false,$true) 'Restored inherited ACL remained invalid.'
+        } finally { $lease.Dispose() }
+    }
+    Test-Case 'finalized trace validation rejects a competing writer and holds the directory path' {
+        $path = Join-Path $caseRoot 'trace writer'
+        $lease = New-Object Dot1xLoggingV2.DirectoryLease($path,$caller,$true,$true)
+        try {
+            $etl = Join-Path $path 'EapHost.etl'
+            [IO.File]::WriteAllText($etl,'synthetic pending trace')
+            $writer = New-Object IO.FileStream($etl,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
+            try {
+                Assert-True $lease.ValidateTraceFile('EapHost.etl',$false) 'Active-writer metadata validation was rejected.'
+                Assert-Throws { $lease.ValidateTraceFile('EapHost.etl',$false,$true) } 'open failed'
+            } finally { $writer.Dispose() }
+            Assert-True $lease.ValidateTraceFile('EapHost.etl',$false,$true) 'Closed trace failed finalized validation.'
+            Assert-Throws { [IO.Directory]::Move($path,($path+'-moved')) }
+            Assert-True ([IO.Directory]::Exists($path)) 'Leased trace directory moved.'
+            Assert-True (-not [IO.Directory]::Exists($path+'-moved')) 'Leased trace directory acquired a moved alias.'
+        } finally { $lease.Dispose() }
+    }
+    Test-Case 'only a newly created empty trace leaf can be removed through its lease' {
+        $path = Join-Path $caseRoot 'empty trace cleanup'
+        $lease = New-Object Dot1xLoggingV2.DirectoryLease($path,$caller,$true,$true)
+        try { $lease.DeleteEmptyDirectory() } finally { $lease.Dispose() }
+        Assert-True (-not [IO.Directory]::Exists($path)) 'New empty trace output was not removed.'
+        Assert-True ([IO.Directory]::Exists($caseRoot)) 'Cleanup removed the existing parent.'
     }
     Test-Case 'state store rejects unsafe existing ACL without rewriting it' {
         $path = Join-Path $caseRoot 'unsafe'
